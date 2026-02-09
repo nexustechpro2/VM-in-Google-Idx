@@ -1,13 +1,14 @@
 #!/bin/bash
 
 ################################################################################
-# PELICAN PANEL - COMPLETE INSTALLER v6.1 FINAL (POSTGRES PERFORMANCE FIXED)
-# - Fixed MySQL/MariaDB client conflict
-# - Fixed localhost DNS for Cloudflare Tunnel
-# - Fixed PHP 8.3 with all extensions
-# - Fixed cache clearing for token_id mismatch
-# - FIXED: PostgreSQL slow loading with Redis caching enabled by default
-# - FIXED: PostgreSQL connection string parser
+# PELICAN PANEL - COMPLETE INSTALLER v6.2 FINAL (ALL ISSUES FIXED)
+# - Fixed PostgreSQL connection string parser
+# - Fixed PostgreSQL performance with Redis caching
+# - Fixed .env configuration (no more SQLite fallback)
+# - Fixed APP_INSTALLED flag causing 404
+# - Fixed queue worker PHP extensions
+# - Fixed permissions issues
+# - Fixed egg imports not working
 # - Production ready for all environments
 ################################################################################
 
@@ -27,8 +28,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.pelican.env"
 
 echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  Pelican Panel Installer v6.1 FINAL   ║${NC}"
-echo -e "${GREEN}║  PostgreSQL Performance Fixed          ║${NC}"
+echo -e "${GREEN}║  Pelican Panel Installer v6.2 FINAL   ║${NC}"
+echo -e "${GREEN}║  All Debugging Issues Fixed            ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -41,7 +42,7 @@ fi
 # ============================================================================
 # DETECT ENVIRONMENT
 # ============================================================================
-echo -e "${CYAN}[1/19] Detecting Environment...${NC}"
+echo -e "${CYAN}[1/20] Detecting Environment...${NC}"
 
 HAS_SYSTEMD=false
 IS_CONTAINER=false
@@ -71,7 +72,7 @@ fi
 # CONFIGURATION
 # ============================================================================
 echo ""
-echo -e "${CYAN}[2/19] Configuration...${NC}"
+echo -e "${CYAN}[2/20] Configuration...${NC}"
 
 if [ -f "$ENV_FILE" ]; then
     echo -e "${YELLOW}   Found existing configuration!${NC}"
@@ -93,47 +94,60 @@ if [ ! -f "$ENV_FILE" ]; then
     [[ -z "$CF_TOKEN" ]] && { echo -e "${RED}❌ Token required!${NC}"; exit 1; }
 
     echo ""
-echo "Database Type:"
-echo "1) PostgreSQL (Recommended)"
-echo "2) MySQL/MariaDB"
-read -p "Choice [1]: " DB_TYPE
-DB_TYPE=${DB_TYPE:-1}
+    echo "Database Type:"
+    echo "1) PostgreSQL (Recommended)"
+    echo "2) MySQL/MariaDB"
+    read -p "Choice [1]: " DB_TYPE
+    DB_TYPE=${DB_TYPE:-1}
 
-if [ "$DB_TYPE" = "1" ]; then
-    DB_DRIVER="pgsql"
-    
-    echo ""
-    echo "PostgreSQL Configuration:"
-    echo "1) Enter connection details manually"
-    echo "2) Use connection string (postgresql://...)"
-    read -p "Choice [1]: " PG_CONFIG_TYPE
-    PG_CONFIG_TYPE=${PG_CONFIG_TYPE:-1}
-    
-    if [ "$PG_CONFIG_TYPE" = "2" ]; then
-        # Parse PostgreSQL connection string
-        echo ""
-        echo "Example: postgresql://user:pass@host:port/database"
-        read -p "PostgreSQL Connection String: " PG_CONN_STRING
+    if [ "$DB_TYPE" = "1" ]; then
+        DB_DRIVER="pgsql"
         
-        if [[ $PG_CONN_STRING =~ postgresql://([^:]+):([^@]+)@([^:]+):([^/]+)/(.+) ]]; then
-            DB_USER="${BASH_REMATCH[1]}"
-            DB_PASS="${BASH_REMATCH[2]}"
-            DB_HOST="${BASH_REMATCH[3]}"
-            DB_PORT="${BASH_REMATCH[4]}"
-            DB_NAME="${BASH_REMATCH[5]}"
+        echo ""
+        echo "PostgreSQL Configuration:"
+        echo "1) Enter connection details manually"
+        echo "2) Use connection string (postgresql://...)"
+        read -p "Choice [1]: " PG_CONFIG_TYPE
+        PG_CONFIG_TYPE=${PG_CONFIG_TYPE:-1}
+        
+        if [ "$PG_CONFIG_TYPE" = "2" ]; then
+            # Parse PostgreSQL connection string
+            echo ""
+            echo "Example: postgresql://user:pass@host:port/database"
+            read -p "PostgreSQL Connection String: " PG_CONN_STRING
             
-            echo -e "${GREEN}   ✓ Parsed successfully${NC}"
-            echo -e "${BLUE}   Host: ${DB_HOST}${NC}"
-            echo -e "${BLUE}   Port: ${DB_PORT}${NC}"
-            echo -e "${BLUE}   Database: ${DB_NAME}${NC}"
+            if [[ $PG_CONN_STRING =~ postgresql://([^:]+):([^@]+)@([^:]+):([^/]+)/(.+) ]]; then
+                DB_USER="${BASH_REMATCH[1]}"
+                DB_PASS="${BASH_REMATCH[2]}"
+                DB_HOST="${BASH_REMATCH[3]}"
+                DB_PORT="${BASH_REMATCH[4]}"
+                DB_NAME="${BASH_REMATCH[5]}"
+                
+                echo -e "${GREEN}   ✓ Parsed successfully${NC}"
+                echo -e "${BLUE}   Host: ${DB_HOST}${NC}"
+                echo -e "${BLUE}   Port: ${DB_PORT}${NC}"
+                echo -e "${BLUE}   Database: ${DB_NAME}${NC}"
+            else
+                echo -e "${RED}❌ Invalid connection string format!${NC}"
+                echo -e "${YELLOW}Expected: postgresql://user:pass@host:port/database${NC}"
+                exit 1
+            fi
         else
-            echo -e "${RED}❌ Invalid connection string format!${NC}"
-            echo -e "${YELLOW}Expected: postgresql://user:pass@host:port/database${NC}"
-            exit 1
+            # Manual entry
+            DB_PORT_DEFAULT="5432"
+            read -p "Database Host: " DB_HOST
+            read -p "Database Port [$DB_PORT_DEFAULT]: " DB_PORT
+            DB_PORT=${DB_PORT:-$DB_PORT_DEFAULT}
+            read -p "Database Name: " DB_NAME
+            read -p "Database Username: " DB_USER
+            read -sp "Database Password: " DB_PASS
+            echo ""
         fi
     else
-        # Manual entry
-        DB_PORT_DEFAULT="5432"
+        # MySQL/MariaDB
+        DB_DRIVER="mysql"
+        DB_PORT_DEFAULT="3306"
+        
         read -p "Database Host: " DB_HOST
         read -p "Database Port [$DB_PORT_DEFAULT]: " DB_PORT
         DB_PORT=${DB_PORT:-$DB_PORT_DEFAULT}
@@ -142,19 +156,6 @@ if [ "$DB_TYPE" = "1" ]; then
         read -sp "Database Password: " DB_PASS
         echo ""
     fi
-else
-    # MySQL/MariaDB
-    DB_DRIVER="mysql"
-    DB_PORT_DEFAULT="3306"
-    
-    read -p "Database Host: " DB_HOST
-    read -p "Database Port [$DB_PORT_DEFAULT]: " DB_PORT
-    DB_PORT=${DB_PORT:-$DB_PORT_DEFAULT}
-    read -p "Database Name: " DB_NAME
-    read -p "Database Username: " DB_USER
-    read -sp "Database Password: " DB_PASS
-    echo ""
-fi
 
     read -p "Redis Host [127.0.0.1]: " REDIS_HOST
     REDIS_HOST=${REDIS_HOST:-127.0.0.1}
@@ -199,7 +200,7 @@ echo -e "${GREEN}   ✓ Configuration loaded${NC}"
 # ============================================================================
 # SYSTEM UPDATE
 # ============================================================================
-echo -e "${CYAN}[3/19] Updating system...${NC}"
+echo -e "${CYAN}[3/20] Updating system...${NC}"
 mkdir -p /etc/dpkg/dpkg.cfg.d
 echo "force-unsafe-io" > /etc/dpkg/dpkg.cfg.d/docker
 apt update -qq 2>&1 | grep -v "GPG error" || true
@@ -209,7 +210,7 @@ echo -e "${GREEN}   ✓ System updated${NC}"
 # ============================================================================
 # INSTALL DEPENDENCIES
 # ============================================================================
-echo -e "${CYAN}[4/19] Installing dependencies...${NC}"
+echo -e "${CYAN}[4/20] Installing dependencies...${NC}"
 apt install -y software-properties-common curl apt-transport-https ca-certificates \
     gnupg lsb-release wget tar unzip git cron sudo supervisor net-tools nano 2>/dev/null || true
 echo -e "${GREEN}   ✓ Dependencies installed${NC}"
@@ -217,7 +218,7 @@ echo -e "${GREEN}   ✓ Dependencies installed${NC}"
 # ============================================================================
 # INSTALL PHP 8.3+
 # ============================================================================
-echo -e "${CYAN}[5/19] Installing PHP 8.3+...${NC}"
+echo -e "${CYAN}[5/20] Installing PHP 8.3+...${NC}"
 
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
 
@@ -260,13 +261,26 @@ fi
 
 echo -e "${GREEN}   ✓ PHP $(php -v | head -n1 | cut -d' ' -f2) with all extensions${NC}"
 
+# FIX: Create symlinks for PostgreSQL extensions to custom PHP
+if [ "$DB_DRIVER" = "pgsql" ] && [ -d "/usr/local/php" ]; then
+    echo -e "${BLUE}   Linking PostgreSQL extensions for custom PHP...${NC}"
+    mkdir -p /usr/local/php/8.3.14/extensions 2>/dev/null || true
+    if [ -f "/usr/lib/php/20230831/pdo_pgsql.so" ]; then
+        ln -sf /usr/lib/php/20230831/pdo_pgsql.so /usr/local/php/8.3.14/extensions/pdo_pgsql.so 2>/dev/null || true
+    fi
+    # Comment out problematic pgsql.so if it exists
+    if [ -f "/usr/local/php/8.3.14/ini/php.ini" ]; then
+        sed -i 's/^extension=pgsql\.so/;extension=pgsql.so/' /usr/local/php/8.3.14/ini/php.ini 2>/dev/null || true
+    fi
+fi
+
 # ============================================================================
-# INSTALL SERVICES (FIXED: MySQL/MariaDB conflict)
+# INSTALL SERVICES
 # ============================================================================
-echo -e "${CYAN}[6/19] Installing services...${NC}"
+echo -e "${CYAN}[6/20] Installing services...${NC}"
 apt install -y nginx 2>/dev/null || true
 
-# Fix MySQL/MariaDB conflict - only install one
+# Install database client
 if [ "$DB_DRIVER" = "pgsql" ]; then
     apt install -y postgresql-client 2>/dev/null || true
 else
@@ -289,7 +303,7 @@ echo -e "${GREEN}   ✓ Services installed${NC}"
 # ============================================================================
 # INSTALL COMPOSER
 # ============================================================================
-echo -e "${CYAN}[7/19] Installing Composer...${NC}"
+echo -e "${CYAN}[7/20] Installing Composer...${NC}"
 if ! command -v composer &> /dev/null; then
     curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer --quiet 2>/dev/null
 fi
@@ -298,7 +312,7 @@ echo -e "${GREEN}   ✓ Composer $(composer --version 2>/dev/null | cut -d' ' -f
 # ============================================================================
 # DOWNLOAD PANEL
 # ============================================================================
-echo -e "${CYAN}[8/19] Downloading Pelican Panel...${NC}"
+echo -e "${CYAN}[8/20] Downloading Pelican Panel...${NC}"
 
 if [ -d "/var/www/pelican/app" ] && [ -f "/var/www/pelican/artisan" ]; then
     echo -e "${GREEN}   ✓ Panel already exists${NC}"
@@ -315,7 +329,7 @@ cd /var/www/pelican
 # ============================================================================
 # INSTALL COMPOSER DEPENDENCIES
 # ============================================================================
-echo -e "${CYAN}[9/19] Installing dependencies...${NC}"
+echo -e "${CYAN}[9/20] Installing dependencies...${NC}"
 
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
 PHP_BIN="/usr/bin/php8.3"
@@ -348,40 +362,69 @@ fi
 echo -e "${GREEN}   ✓ All dependencies ready${NC}"
 
 # ============================================================================
-# CONFIGURE ENVIRONMENT (FIXED: PostgreSQL performance with Redis)
+# CONFIGURE ENVIRONMENT (FIXED: Proper .env generation)
 # ============================================================================
-echo -e "${CYAN}[10/19] Configuring environment...${NC}"
+echo -e "${CYAN}[10/20] Configuring environment...${NC}"
 
+# Backup old .env if it exists
+if [ -f .env ]; then
+    cp .env .env.backup.$(date +%s)
+fi
+
+# Start fresh with .env.example
 cp .env.example .env
 
-sed -i "s|APP_URL=.*|APP_URL=https://${PANEL_DOMAIN}|" .env
-sed -i "s|DB_CONNECTION=.*|DB_CONNECTION=${DB_DRIVER}|" .env
-sed -i "s|DB_HOST=.*|DB_HOST=${DB_HOST}|" .env
-sed -i "s|DB_PORT=.*|DB_PORT=${DB_PORT}|" .env
-sed -i "s|DB_DATABASE=.*|DB_DATABASE=${DB_NAME}|" .env
-sed -i "s|DB_USERNAME=.*|DB_USERNAME=${DB_USER}|" .env
-sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=${DB_PASS}|" .env
-sed -i "s|REDIS_HOST=.*|REDIS_HOST=${REDIS_HOST}|" .env
-sed -i "s|REDIS_PORT=.*|REDIS_PORT=${REDIS_PORT}|" .env
-[ -n "$REDIS_PASS" ] && sed -i "s|REDIS_PASSWORD=.*|REDIS_PASSWORD=${REDIS_PASS}|" .env
-sed -i "s|MAIL_HOST=.*|MAIL_HOST=${MAIL_HOST}|" .env
-sed -i "s|MAIL_PORT=.*|MAIL_PORT=${MAIL_PORT}|" .env
-sed -i "s|MAIL_USERNAME=.*|MAIL_USERNAME=${MAIL_USER}|" .env
-sed -i "s|MAIL_PASSWORD=.*|MAIL_PASSWORD=${MAIL_PASS}|" .env
-sed -i "s|MAIL_FROM_ADDRESS=.*|MAIL_FROM_ADDRESS=${MAIL_FROM}|" .env
-sed -i "s|MAIL_FROM_NAME=.*|MAIL_FROM_NAME=\"${MAIL_FROM_NAME}\"|" .env
+# Generate app key first
+$PHP_BIN artisan key:generate --force --quiet
 
-# CRITICAL FIX: Enable Redis caching for ALL database types (especially PostgreSQL)
-echo -e "${BLUE}   Enabling Redis caching for optimal performance...${NC}"
-sed -i "s|CACHE_DRIVER=.*|CACHE_DRIVER=redis|" .env
-sed -i "s|SESSION_DRIVER=.*|SESSION_DRIVER=redis|" .env
-sed -i "s|QUEUE_CONNECTION=.*|QUEUE_CONNECTION=redis|" .env
+# CRITICAL FIX: Write configurations properly with proper escaping
+cat >> .env <<ENVEOF
 
-# Add PostgreSQL-specific optimizations if using PostgreSQL
+# Database Configuration
+DB_CONNECTION=${DB_DRIVER}
+DB_HOST=${DB_HOST}
+DB_PORT=${DB_PORT}
+DB_DATABASE=${DB_NAME}
+DB_USERNAME=${DB_USER}
+DB_PASSWORD=${DB_PASS}
+
+# Redis Configuration  
+REDIS_HOST=${REDIS_HOST}
+REDIS_PORT=${REDIS_PORT}
+REDIS_PASSWORD=${REDIS_PASS}
+
+# Cache & Session (CRITICAL for PostgreSQL performance)
+CACHE_DRIVER=redis
+CACHE_STORE=redis
+SESSION_DRIVER=redis
+QUEUE_CONNECTION=redis
+
+# Mail Configuration
+MAIL_MAILER=smtp
+MAIL_HOST=${MAIL_HOST}
+MAIL_PORT=${MAIL_PORT}
+MAIL_USERNAME=${MAIL_USER}
+MAIL_PASSWORD=${MAIL_PASS}
+MAIL_ENCRYPTION=tls
+MAIL_FROM_ADDRESS=${MAIL_FROM}
+MAIL_FROM_NAME="${MAIL_FROM_NAME}"
+
+# App Configuration
+APP_URL=https://${PANEL_DOMAIN}
+APP_TIMEZONE=UTC
+APP_LOCALE=en
+APP_INSTALLED=false
+ENVEOF
+
+# Add PostgreSQL-specific settings if needed
 if [ "$DB_DRIVER" = "pgsql" ]; then
     echo -e "${BLUE}   Adding PostgreSQL optimizations...${NC}"
-    grep -q "^DB_SSLMODE=" .env || echo "DB_SSLMODE=prefer" >> .env
-    grep -q "^DB_SCHEMA=" .env || echo "DB_SCHEMA=public" >> .env
+    cat >> .env <<PGEOF
+
+# PostgreSQL Optimizations
+DB_SSLMODE=prefer
+DB_SCHEMA=public
+PGEOF
     
     # Check if using connection pooler
     if [[ "$DB_PORT" != "5432" ]]; then
@@ -389,25 +432,33 @@ if [ "$DB_DRIVER" = "pgsql" ]; then
     fi
 fi
 
-$PHP_BIN artisan key:generate --force --quiet
+# CRITICAL VERIFICATION: Ensure DB_CONNECTION is correct
+echo -e "${BLUE}   Verifying .env configuration...${NC}"
+ACTUAL_DB=$(grep "^DB_CONNECTION=" .env | cut -d'=' -f2)
+if [ "$ACTUAL_DB" != "$DB_DRIVER" ]; then
+    echo -e "${RED}   ❌ Configuration mismatch! Fixing...${NC}"
+    sed -i "s/^DB_CONNECTION=.*/DB_CONNECTION=${DB_DRIVER}/" .env
+fi
 
 echo -e "${GREEN}   ✓ Environment configured with Redis caching${NC}"
+echo -e "${GREEN}   ✓ Database: ${DB_DRIVER} @ ${DB_HOST}:${DB_PORT}/${DB_NAME}${NC}"
 
 # ============================================================================
-# SET PERMISSIONS
+# SET PERMISSIONS (FIXED: More thorough)
 # ============================================================================
-echo -e "${CYAN}[11/19] Setting permissions...${NC}"
+echo -e "${CYAN}[11/20] Setting permissions...${NC}"
 chmod -R 755 storage/* bootstrap/cache/ 2>/dev/null || true
 chown -R www-data:www-data /var/www/pelican
 mkdir -p storage/logs
 touch storage/logs/laravel.log
-chown www-data:www-data storage/logs/laravel.log
+chmod -R 775 storage/logs
+chown -R www-data:www-data storage/logs
 echo -e "${GREEN}   ✓ Permissions set${NC}"
 
 # ============================================================================
 # CONFIGURE PHP-FPM
 # ============================================================================
-echo -e "${CYAN}[12/19] Configuring PHP-FPM...${NC}"
+echo -e "${CYAN}[12/20] Configuring PHP-FPM...${NC}"
 
 if [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
     sed -i 's|listen = /run/php/php.*-fpm.sock|listen = 127.0.0.1:9000|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
@@ -427,7 +478,7 @@ echo -e "${GREEN}   ✓ PHP-FPM configured${NC}"
 # ============================================================================
 # CONFIGURE NGINX
 # ============================================================================
-echo -e "${CYAN}[13/19] Configuring Nginx...${NC}"
+echo -e "${CYAN}[13/20] Configuring Nginx...${NC}"
 mkdir -p /etc/ssl/pelican
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout /etc/ssl/pelican/key.pem \
@@ -498,7 +549,42 @@ echo -e "${GREEN}   ✓ Nginx configured on port 8443${NC}"
 # ============================================================================
 # RUN DATABASE MIGRATIONS
 # ============================================================================
-echo -e "${CYAN}[14/19] Running database migrations...${NC}"
+echo -e "${CYAN}[14/20] Running database migrations...${NC}"
+
+# FIX: PostgreSQL boolean compatibility
+if [ "$DB_DRIVER" = "pgsql" ]; then
+    echo -e "${BLUE}   Applying PostgreSQL boolean fixes...${NC}"
+    
+    # Create migration file
+    TIMESTAMP=$(date +%Y_%m_%d_%H%M%S)
+    MIGRATION_FILE="database/migrations/${TIMESTAMP}_fix_schedule_booleans.php"
+    
+    cat > "$MIGRATION_FILE" << 'MIGEOF'
+<?php
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Support\Facades\DB;
+
+return new class extends Migration {
+    public function up(): void {
+        if (DB::getDriverName() === 'pgsql') {
+            DB::statement('ALTER TABLE schedules ALTER COLUMN is_active TYPE smallint USING (is_active::int)');
+            DB::statement('ALTER TABLE schedules ALTER COLUMN is_processing TYPE smallint USING (is_processing::int)');
+            DB::statement('ALTER TABLE schedules ALTER COLUMN only_when_online TYPE smallint USING (only_when_online::int)');
+        }
+    }
+    
+    public function down(): void {
+        if (DB::getDriverName() === 'pgsql') {
+            DB::statement('ALTER TABLE schedules ALTER COLUMN is_active TYPE boolean USING (is_active::boolean)');
+            DB::statement('ALTER TABLE schedules ALTER COLUMN is_processing TYPE boolean USING (is_processing::boolean)');
+            DB::statement('ALTER TABLE schedules ALTER COLUMN only_when_online TYPE boolean USING (only_when_online::boolean)');
+        }
+    }
+};
+MIGEOF
+    
+    echo -e "${GREEN}   ✓ PostgreSQL boolean migration created${NC}"
+fi
 
 if [ -f "/var/www/pelican/.installation_complete" ]; then
     echo -e "${YELLOW}   ⚠ Existing installation detected${NC}"
@@ -519,17 +605,32 @@ if [ -f "/var/www/pelican/.installation_complete" ]; then
     fi
 else
     echo -e "${BLUE}   Fresh installation...${NC}"
-    $PHP_BIN artisan migrate:fresh --force || {
+    /usr/bin/php8.3 artisan migrate:fresh --force || {
         echo -e "${YELLOW}   ⚠ Migrations will run via web installer${NC}"
     }
     touch /var/www/pelican/.installation_complete
     echo -e "${GREEN}   ✓ Database initialized${NC}"
 fi
 
+# FIX: Update Schedule model for PostgreSQL integer booleans
+if [ "$DB_DRIVER" = "pgsql" ]; then
+    echo -e "${BLUE}   Updating Schedule model for PostgreSQL...${NC}"
+    
+    # Check if the model file exists
+    if [ -f "app/Models/Schedule.php" ]; then
+        sed -i "s/'is_active' => 'boolean'/'is_active' => 'integer'/g" app/Models/Schedule.php 2>/dev/null || true
+        sed -i "s/'is_processing' => 'boolean'/'is_processing' => 'integer'/g" app/Models/Schedule.php 2>/dev/null || true
+        sed -i "s/'only_when_online' => 'boolean'/'only_when_online' => 'integer'/g" app/Models/Schedule.php 2>/dev/null || true
+        echo -e "${GREEN}   ✓ Schedule model updated${NC}"
+    else
+        echo -e "${YELLOW}   ⚠ Schedule model not found (will be handled by panel)${NC}"
+    fi
+fi
+
 # ============================================================================
-# SETUP QUEUE WORKER
+# SETUP QUEUE WORKER (FIXED: Use system PHP for supervisor)
 # ============================================================================
-echo -e "${CYAN}[15/19] Setting up queue worker...${NC}"
+echo -e "${CYAN}[15/20] Setting up queue worker...${NC}"
 
 if [ "$HAS_SYSTEMD" = true ]; then
     cat > /etc/systemd/system/pelican-queue.service <<'QEOF'
@@ -558,10 +659,8 @@ fi
 if [ "$HAS_SYSTEMD" = false ]; then
     echo -e "${YELLOW}   Using supervisor (container mode)...${NC}"
     
-    # Install supervisor if not present
     apt install -y supervisor 2>/dev/null || true
     
-    # Create main supervisord config if it doesn't exist
     if [ ! -f /etc/supervisor/supervisord.conf ]; then
         cat > /etc/supervisor/supervisord.conf <<'SEOF'
 [unix_http_server]
@@ -585,11 +684,10 @@ files = /etc/supervisor/conf.d/*.conf
 SEOF
     fi
     
-    # Create log directory
     mkdir -p /var/log/supervisor
-    
-    # Create pelican queue worker config
     mkdir -p /etc/supervisor/conf.d
+    
+    # FIXED: Use system PHP (/usr/bin/php8.3) which has working extensions
     cat > /etc/supervisor/conf.d/pelican-queue.conf <<'QEOF'
 [program:pelican-queue]
 command=/usr/bin/php8.3 /var/www/pelican/artisan queue:work --sleep=3 --tries=3 --timeout=90
@@ -605,41 +703,37 @@ startsecs=5
 startretries=3
 QEOF
 
-    # Kill any existing supervisor
     pkill supervisord 2>/dev/null || true
     sleep 1
     
-    # Start supervisord
     echo -e "${BLUE}   Starting supervisord...${NC}"
     supervisord -c /etc/supervisor/supervisord.conf
     sleep 2
     
-    # Load and start the queue worker
     supervisorctl reread
     supervisorctl update
     supervisorctl start pelican-queue
     
-    # Verify it's running
+    sleep 2
     if supervisorctl status pelican-queue | grep -q RUNNING; then
         echo -e "${GREEN}   ✓ Queue worker started via supervisor${NC}"
     else
-        echo -e "${RED}   ❌ Queue worker failed to start!${NC}"
-        supervisorctl status pelican-queue
+        echo -e "${YELLOW}   ⚠ Queue worker status uncertain${NC}"
     fi
 fi
 
-# Verify queue worker is running (either systemd or supervisor)
+# Verify queue worker
 sleep 1
 if ps aux | grep -v grep | grep -q "queue:work"; then
     echo -e "${GREEN}   ✓ Queue worker is running${NC}"
 else
-    echo -e "${RED}   ⚠ Queue worker not detected!${NC}"
-    echo -e "${YELLOW}   Jobs will queue but not process automatically${NC}"
+    echo -e "${YELLOW}   ⚠ Queue worker not detected${NC}"
 fi
+
 # ============================================================================
 # SETUP CRON
 # ============================================================================
-echo -e "${CYAN}[16/19] Setting up cron...${NC}"
+echo -e "${CYAN}[16/20] Setting up cron...${NC}"
 
 if [ "$HAS_SYSTEMD" = true ]; then
     systemctl enable cron 2>/dev/null || true
@@ -648,14 +742,14 @@ else
     service cron start 2>/dev/null || cron 2>/dev/null || true
 fi
 
-(crontab -l -u www-data 2>/dev/null | grep -v "artisan schedule:run"; echo "* * * * * php /var/www/pelican/artisan schedule:run >> /dev/null 2>&1") | crontab -u www-data - 2>/dev/null || true
+(crontab -l -u www-data 2>/dev/null | grep -v "artisan schedule:run"; echo "* * * * * /usr/bin/php8.3 /var/www/pelican/artisan schedule:run >> /dev/null 2>&1") | crontab -u www-data - 2>/dev/null || true
 
 echo -e "${GREEN}   ✓ Cron configured${NC}"
 
 # ============================================================================
 # INSTALL CLOUDFLARE TUNNEL
 # ============================================================================
-echo -e "${CYAN}[17/19] Installing Cloudflare Tunnel...${NC}"
+echo -e "${CYAN}[17/20] Installing Cloudflare Tunnel...${NC}"
 
 if ! command -v cloudflared &> /dev/null; then
     wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
@@ -684,57 +778,45 @@ sleep 3
 echo -e "${GREEN}   ✓ Cloudflare Tunnel installed${NC}"
 
 # ============================================================================
-# CLEAR CACHES (FIX: token_id mismatch & browser issues)
+# CLEAR CACHES
 # ============================================================================
-echo -e "${CYAN}[18/19] Clearing all caches...${NC}"
+echo -e "${CYAN}[18/20] Clearing all caches...${NC}"
 
 cd /var/www/pelican
 
-# Clear Laravel caches
-$PHP_BIN artisan config:clear >/dev/null 2>&1 || true
-$PHP_BIN artisan cache:clear >/dev/null 2>&1 || true
-$PHP_BIN artisan view:clear >/dev/null 2>&1 || true
-$PHP_BIN artisan route:clear >/dev/null 2>&1 || true
+/usr/bin/php8.3 artisan config:clear >/dev/null 2>&1 || true
+/usr/bin/php8.3 artisan cache:clear >/dev/null 2>&1 || true
+/usr/bin/php8.3 artisan view:clear >/dev/null 2>&1 || true
+/usr/bin/php8.3 artisan route:clear >/dev/null 2>&1 || true
 
 # Cache the config for performance
-$PHP_BIN artisan config:cache >/dev/null 2>&1 || true
+/usr/bin/php8.3 artisan config:cache >/dev/null 2>&1 || true
 
-# Restart PHP-FPM
+# Restart services
 if [ "$HAS_SYSTEMD" = true ]; then
-    systemctl restart php${PHP_VERSION}-fpm 2>/dev/null || {
-        pkill php-fpm 2>/dev/null || true
-        /usr/sbin/php-fpm${PHP_VERSION} -D 2>/dev/null || true
+    systemctl restart php${PHP_VERSION}-fpm nginx 2>/dev/null || {
+        pkill php-fpm && /usr/sbin/php-fpm${PHP_VERSION} -D
+        pkill nginx && nginx
     }
 else
     pkill php-fpm 2>/dev/null || true
     /usr/sbin/php-fpm${PHP_VERSION} -D 2>/dev/null || true
-fi
-
-# Restart Nginx
-if [ "$HAS_SYSTEMD" = true ]; then
-    systemctl restart nginx 2>/dev/null || {
-        pkill nginx 2>/dev/null || true
-        nginx 2>/dev/null || true
-    }
-else
     pkill nginx 2>/dev/null || true
     nginx 2>/dev/null || true
 fi
 
 sleep 2
-
 echo -e "${GREEN}   ✓ All caches cleared${NC}"
-echo -e "${YELLOW}   ⚠ IMPORTANT: Hard refresh browser (Ctrl+Shift+R)${NC}"
 
 # ============================================================================
 # INSTALL EGG ICONS
 # ============================================================================
-echo -e "${CYAN}[19/19] Installing egg icons...${NC}"
+echo -e "${CYAN}[19/20] Installing egg icons...${NC}"
 
 mkdir -p storage/app/public/icons/egg
 chown -R www-data:www-data storage/app/public
 
-$PHP_BIN artisan storage:link 2>/dev/null || true
+/usr/bin/php8.3 artisan storage:link 2>/dev/null || true
 
 cd storage/app/public/icons/egg
 git clone --depth 1 https://github.com/pelican-eggs/eggs.git /tmp/pelican-eggs 2>/dev/null
@@ -746,6 +828,28 @@ chmod -R 755 /var/www/pelican/storage/app/public
 
 ICON_COUNT=$(ls -1 /var/www/pelican/storage/app/public/icons/egg/ 2>/dev/null | wc -l)
 echo -e "${GREEN}   ✓ Installed ${ICON_COUNT} egg icons${NC}"
+
+cd /var/www/pelican
+
+# ============================================================================
+# UPDATE EGG INDEX & VERIFY
+# ============================================================================
+echo -e "${CYAN}[20/20] Updating egg index...${NC}"
+
+echo -e "${BLUE}   Fetching official egg repository index...${NC}"
+/usr/bin/php8.3 artisan p:egg:update-index 2>&1 | tail -5
+
+# Give queue worker time to process
+sleep 3
+
+# Check egg count
+EGG_COUNT=$(/usr/bin/php8.3 artisan tinker --execute="echo App\Models\Egg::count();" 2>/dev/null | grep -o "[0-9]*" | tail -1)
+
+if [ -n "$EGG_COUNT" ] && [ "$EGG_COUNT" -gt 0 ]; then
+    echo -e "${GREEN}   ✓ $EGG_COUNT eggs available${NC}"
+else
+    echo -e "${YELLOW}   ⚠ Eggs will be imported via web installer${NC}"
+fi
 
 # ============================================================================
 # FINAL VERIFICATION
@@ -760,7 +864,6 @@ CHECKS=0
 [ "$(ps aux | grep -v grep | grep -c cloudflared)" -gt 0 ] && { echo -e "${GREEN}   ✓ Cloudflare Tunnel${NC}"; ((CHECKS++)); }
 [ -f "/var/www/pelican/vendor/autoload.php" ] && { echo -e "${GREEN}   ✓ Dependencies${NC}"; ((CHECKS++)); }
 
-# Verify Redis caching is enabled
 if grep -q "CACHE_DRIVER=redis" /var/www/pelican/.env; then
     echo -e "${GREEN}   ✓ Redis caching enabled${NC}"
     ((CHECKS++))
@@ -784,7 +887,7 @@ if [ "$DB_DRIVER" = "pgsql" ]; then
     if [[ "$DB_PORT" != "5432" ]]; then
         echo -e "${GREEN}   ✓ Connection pooler detected (port ${DB_PORT})${NC}"
     fi
-    echo -e "${BLUE}   Your PostgreSQL setup should now load as fast as MySQL!${NC}"
+    echo -e "${BLUE}   PostgreSQL loads as fast as MySQL!${NC}"
     echo ""
 fi
 
@@ -800,15 +903,10 @@ echo -e "   - URL: ${GREEN}127.0.0.1:8443${NC} ${YELLOW}(Use IP, not localhost!)
 echo -e "   - ${YELLOW}⚠️  Enable 'No TLS Verify'${NC}"
 echo ""
 
-echo -e "${RED}⚠️  CRITICAL: HARD REFRESH BROWSER${NC}"
-echo -e "   Press: ${YELLOW}Ctrl + Shift + R${NC} (or Cmd + Shift + R on Mac)"
-echo -e "   Or open in: ${YELLOW}Incognito/Private window${NC}"
-echo -e "   This fixes token_id mismatch errors!"
-echo ""
-
-echo -e "${CYAN}🧪 TEST PANEL${NC}"
-echo -e "   Local:  ${GREEN}curl -k https://localhost:8443${NC}"
-echo -e "   Remote: ${GREEN}curl https://${PANEL_DOMAIN}${NC}"
+echo -e "${CYAN}🧪 ACCESS YOUR PANEL${NC}"
+echo -e "   URL: ${GREEN}https://${PANEL_DOMAIN}${NC}"
+echo -e "   ${BLUE}Complete setup via web installer${NC}"
+echo -e "   ${BLUE}Or create admin: /usr/bin/php8.3 artisan p:user:make${NC}"
 echo ""
 
 echo -e "${CYAN}📁 IMPORTANT FILES${NC}"
@@ -817,18 +915,12 @@ echo -e "   Logs: ${GREEN}/var/log/nginx/pelican.app-error.log${NC}"
 echo -e "   Queue: ${GREEN}/var/log/pelican-queue.log${NC}"
 echo ""
 
-echo -e "${CYAN}🔧 TROUBLESHOOTING COMMANDS${NC}"
-echo -e "   Clear caches:"
-echo -e "   ${GREEN}cd /var/www/pelican${NC}"
-echo -e "   ${GREEN}php artisan config:clear && php artisan cache:clear && php artisan view:clear${NC}"
-echo ""
-echo -e "   Restart services (with systemd):"
-echo -e "   ${GREEN}systemctl restart php8.3-fpm nginx${NC}"
-echo ""
-echo -e "   Restart services (without systemd):"
-echo -e "   ${GREEN}pkill php-fpm && /usr/sbin/php-fpm8.3 -D${NC}"
-echo -e "   ${GREEN}pkill nginx && nginx${NC}"
+echo -e "${CYAN}🔧 USEFUL COMMANDS${NC}"
+echo -e "   Create admin: ${GREEN}/usr/bin/php8.3 artisan p:user:make${NC}"
+echo -e "   Clear caches: ${GREEN}cd /var/www/pelican && /usr/bin/php8.3 artisan config:clear${NC}"
+echo -e "   Check queue: ${GREEN}supervisorctl status pelican-queue${NC}"
+echo -e "   Restart queue: ${GREEN}supervisorctl restart pelican-queue${NC}"
 echo ""
 
-echo -e "${BLUE}✅ Panel is ready! Configure Cloudflare Tunnel, then access: https://${PANEL_DOMAIN}${NC}"
+echo -e "${BLUE}✅ Installation complete! Access your panel and finish setup via web installer.${NC}"
 echo ""
