@@ -413,7 +413,6 @@ MAIL_FROM_NAME="${MAIL_FROM_NAME}"
 APP_URL=https://${PANEL_DOMAIN}
 APP_TIMEZONE=UTC
 APP_LOCALE=en
-APP_INSTALLED=false
 ENVEOF
 
 # Add PostgreSQL-specific settings if needed
