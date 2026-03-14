@@ -207,7 +207,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStartPre=/bin/bash -c 'pkill -9 sshx; sleep 1'
-ExecStart=/usr/local/bin/sshx run
+ExecStart=/usr/local/bin/sshx
 Restart=always
 RestartSec=10
 

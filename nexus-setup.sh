@@ -178,7 +178,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStartPre=/bin/bash -c 'pkill -9 sshx; sleep 1'
-ExecStart=/usr/local/bin/sshx run
+ExecStart=/usr/local/bin/sshx
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -253,7 +253,13 @@ echo "  ✅ Tailscale (secure tunnel)"
 echo "  ✅ Firefox (launch with: DISPLAY=:10 firefox &)"
 echo "  ✅ Keepalive (pings every 60s)"
 echo ""
-echo -e "${YELLOW}To get sshx link:${NC}"
-echo "  journalctl -u sshx -f"
+echo -e "${YELLOW}sshx Link:${NC}"
+sleep 4
+SSHX_LINK=$(journalctl -u sshx -n 20 --no-pager | grep -o 'https://sshx.io/s/[^ ]*' | head -1)
+if [ -n "$SSHX_LINK" ]; then
+    echo -e "${GREEN}  ➜ $SSHX_LINK${NC}"
+else
+    echo -e "${YELLOW}  ⏳ Link not ready yet — run: journalctl -u sshx -n 20 --no-pager${NC}"
+fi
 echo ""
 echo -e "${CYAN}============================================================${NC}"
