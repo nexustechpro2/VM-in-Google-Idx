@@ -103,7 +103,7 @@ while true; do
             section "🔧 Running Server Setup Script"
             echo -e "${Y}  This will set up SSH, Tailscale, xRDP, sshx, Firefox & Keepalive...${N}"
             echo ""
-            curl -fsSL "${BASE_URL}/nexus-setup.sh"
+            bash <(curl -fsSL "${BASE_URL}/nexus-setup.sh")
             pause
             ;;
 
@@ -112,7 +112,7 @@ while true; do
             section "🐦 Installing Pelican Panel"
             echo -e "${Y}  Full Pelican Panel installation with Cloudflare Tunnel...${N}"
             echo ""
-            curl -fsSL "${BASE_URL}/panel.sh"
+            bash <(curl -fsSL "${BASE_URL}/panel.sh")
             pause
             ;;
 
@@ -120,7 +120,7 @@ while true; do
             section "🐦 Installing Pelican Wings"
             echo -e "${Y}  Wings node daemon installation and configuration...${N}"
             echo ""
-            curl -fsSL "${BASE_URL}/wings.sh" 
+            bash <(curl -fsSL "${BASE_URL}/wings.sh") 
             pause
             ;;
 
@@ -128,7 +128,7 @@ while true; do
             section "👥 User Registration & Resource Limits"
             echo -e "${Y}  Installing Register + User-Creatable-Servers plugins...${N}"
             echo ""
-            curl -fsSL "${BASE_URL}/plugin-client.sh"
+            bash <(curl -fsSL "${BASE_URL}/plugin-client.sh")
             pause
             ;;
 
@@ -136,7 +136,7 @@ while true; do
             section "🔄 Restarting All Services"
             echo -e "${Y}  Restarting Panel, Wings, Docker, Cloudflare & all services...${N}"
             echo ""
-            curl -fsSL "${BASE_URL}/restart.sh"
+            bash <(curl -fsSL "${BASE_URL}/restart.sh")
             pause
             ;;
 
@@ -146,7 +146,7 @@ while true; do
             echo ""
             read -p "${W}  Are you sure? (type YES to continue): ${N}" confirm
             if [ "$confirm" = "YES" ]; then
-                curl -fsSL "${BASE_URL}/uninstall.sh"
+                bash <(curl -fsSL "${BASE_URL}/uninstall.sh")
             else
                 echo -e "${G}  Cancelled.${N}"
             fi
