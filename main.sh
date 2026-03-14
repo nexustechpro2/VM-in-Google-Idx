@@ -214,12 +214,19 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+            systemctl stop sshx > /dev/null 2>&1
             systemctl daemon-reload > /dev/null 2>&1
             systemctl enable sshx > /dev/null 2>&1
             systemctl start sshx > /dev/null 2>&1
             echo ""
             echo -e "${G}  ✅ sshx installed and running as service!${N}"
-            echo -e "${C}  View sshx link: ${G}journalctl -u sshx -f${N}"
+            sleep 4
+            SSHX_LINK=$(journalctl -u sshx -n 20 --no-pager | grep -o 'https://sshx.io/s/[^ ]*' | head -1)
+            if [ -n "$SSHX_LINK" ]; then
+                echo -e "${G}  ➜ sshx Link: $SSHX_LINK${N}"
+            else
+                echo -e "${Y}  ⏳ Link not ready — run: journalctl -u sshx -n 20 --no-pager${N}"
+            fi
             pause
             ;;
 
