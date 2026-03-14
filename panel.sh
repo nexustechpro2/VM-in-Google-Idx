@@ -1,11 +1,14 @@
 #!/bin/bash
 
 ################################################################################
-# PELICAN PANEL - COMPLETE INSTALLER v7.2 PRODUCTION READY
+# PELICAN PANEL - COMPLETE INSTALLER v7.3 PRODUCTION READY
 # - FIXED: Preserves APP_KEY on reinstall (prevents MAC invalid errors)
 # - FIXED: Saves PAPP tokens and Node IDs to .pelican.env
 # - FIXED: Auto-backup and restore on Codespace migrations
 # - FIXED: PostgreSQL connection string parser
+# - FIXED: No config:cache (breaks dynamic plugins)
+# - FIXED: Supervisor queue worker (no systemd required)
+# - FIXED: PHP-FPM on port 9000 (fixes 502 Bad Gateway)
 # - Production ready for all environments
 ################################################################################
 
@@ -25,7 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.pelican.env"
 
 echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║  Pelican Panel Installer v7.2 FINAL   ║${NC}"
+echo -e "${GREEN}║  Pelican Panel Installer v7.3 FINAL   ║${NC}"
 echo -e "${GREEN}║  Production Ready - Migration Safe    ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
 echo ""
@@ -44,16 +47,15 @@ if [ -f "/var/www/pelican/.env" ]; then
     mkdir -p "$BACKUP_DIR"
     chmod 755 "$BACKUP_DIR"
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    
+
     echo -e "${CYAN}[BACKUP] Found existing Panel installation${NC}"
     echo -e "${YELLOW}   Creating backup of .env file...${NC}"
-    
+
     cp /var/www/pelican/.env "${BACKUP_DIR}/env_${TIMESTAMP}.backup"
     chmod 644 "${BACKUP_DIR}/env_${TIMESTAMP}.backup"
-    
-    # Extract critical data
+
     EXISTING_APP_KEY=$(grep "^APP_KEY=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
-    
+
     echo -e "${GREEN}   ✓ Backup saved: ${BACKUP_DIR}/env_${TIMESTAMP}.backup${NC}"
     echo -e "${CYAN}   💾 IMPORTANT: Download this file before switching Codespaces!${NC}"
     echo ""
@@ -100,18 +102,17 @@ if [ -f "$ENV_FILE" ]; then
     echo -e "${GREEN}   Using: $ENV_FILE${NC}"
     echo -e "${CYAN}   Domain: ${GREEN}${PANEL_DOMAIN}${NC}"
     echo -e "${CYAN}   Database: ${GREEN}${DB_DRIVER} (${DB_HOST})${NC}"
-    
-    # Show saved tokens if they exist
+
     if [ -n "$PANEL_API_TOKEN" ]; then
         echo -e "${CYAN}   Panel Token: ${GREEN}${PANEL_API_TOKEN:0:20}...${NC}"
     fi
     if [ -n "$NODE_ID" ]; then
         echo -e "${CYAN}   Node ID: ${GREEN}${NODE_ID}${NC}"
     fi
-    
+
     read -p "   Use these settings? (y/n) [y]: " USE_EXISTING
     USE_EXISTING=${USE_EXISTING:-y}
-    
+
     if [[ ! "$USE_EXISTING" =~ ^[Yy] ]]; then
         echo -e "${YELLOW}   Starting fresh configuration...${NC}"
         mv "$ENV_FILE" "${ENV_FILE}.backup.$(date +%s)"
@@ -132,26 +133,25 @@ if [ ! -f "$ENV_FILE" ]; then
 
     if [ "$DB_TYPE" = "1" ]; then
         DB_DRIVER="pgsql"
-        
+
         echo ""
         echo "PostgreSQL Configuration:"
         echo "1) Enter connection details manually"
         echo "2) Use connection string (postgresql://...)"
         read -p "Choice [1]: " PG_CONFIG_TYPE
         PG_CONFIG_TYPE=${PG_CONFIG_TYPE:-1}
-        
+
         if [ "$PG_CONFIG_TYPE" = "2" ]; then
             echo ""
             echo "Example: postgresql://user:pass@host:port/database"
             read -p "PostgreSQL Connection String: " PG_CONN_STRING
-            
+
             if [[ $PG_CONN_STRING =~ postgresql://([^:]+):([^@]+)@([^:]+):([^/]+)/(.+) ]]; then
                 DB_USER="${BASH_REMATCH[1]}"
                 DB_PASS="${BASH_REMATCH[2]}"
                 DB_HOST="${BASH_REMATCH[3]}"
                 DB_PORT="${BASH_REMATCH[4]}"
                 DB_NAME="${BASH_REMATCH[5]}"
-                
                 echo -e "${GREEN}   ✓ Parsed successfully${NC}"
             else
                 echo -e "${RED}❌ Invalid connection string!${NC}"
@@ -170,7 +170,7 @@ if [ ! -f "$ENV_FILE" ]; then
     else
         DB_DRIVER="mysql"
         DB_PORT_DEFAULT="3306"
-        
+
         read -p "Database Host: " DB_HOST
         read -p "Database Port [$DB_PORT_DEFAULT]: " DB_PORT
         DB_PORT=${DB_PORT:-$DB_PORT_DEFAULT}
@@ -198,15 +198,12 @@ if [ ! -f "$ENV_FILE" ]; then
         read -p "From Name: " MAIL_FROM_NAME
     fi
 
-    # Save base configuration
     cat > "$ENV_FILE" <<EOF
 # Pelican Panel Configuration
 # Generated: $(date)
 # IMPORTANT: Keep this file safe! Download before switching Codespaces!
-
 PANEL_DOMAIN="$PANEL_DOMAIN"
 CF_TOKEN="$CF_TOKEN"
-
 # Database Configuration
 DB_DRIVER="$DB_DRIVER"
 DB_HOST="$DB_HOST"
@@ -214,12 +211,10 @@ DB_PORT="$DB_PORT"
 DB_NAME="$DB_NAME"
 DB_USER="$DB_USER"
 DB_PASS="$DB_PASS"
-
 # Redis Configuration
 REDIS_HOST="$REDIS_HOST"
 REDIS_PORT="$REDIS_PORT"
 REDIS_PASS="$REDIS_PASS"
-
 # Mail Configuration (optional)
 MAIL_HOST="$MAIL_HOST"
 MAIL_PORT="$MAIL_PORT"
@@ -227,10 +222,8 @@ MAIL_USER="$MAIL_USER"
 MAIL_PASS="$MAIL_PASS"
 MAIL_FROM="$MAIL_FROM"
 MAIL_FROM_NAME="$MAIL_FROM_NAME"
-
 # Panel API Token (add after creating admin user)
 PANEL_API_TOKEN=""
-
 # Node Configuration (will be added when Wings is installed)
 NODE_ID=""
 NODE_DOMAIN=""
@@ -252,12 +245,17 @@ apt upgrade -y -qq 2>&1 | grep -v "GPG error" || true
 echo -e "${GREEN}   ✓ System updated${NC}"
 
 # ============================================================================
-# INSTALL DEPENDENCIES
+# INSTALL NODE.JS + YARN (required for plugins)
 # ============================================================================
-echo -e "${CYAN}[4/20] Installing dependencies...${NC}"
-apt install -y software-properties-common curl apt-transport-https ca-certificates \
-    gnupg lsb-release wget tar unzip git cron sudo supervisor net-tools nano 2>/dev/null || true
-echo -e "${GREEN}   ✓ Dependencies installed${NC}"
+echo -e "${CYAN}[4b/20] Installing Node.js + Yarn (required for plugins)...${NC}"
+if ! command -v node &>/dev/null; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>/dev/null || true
+    apt install -y nodejs 2>/dev/null || true
+fi
+if ! command -v yarn &>/dev/null; then
+    npm install -g yarn 2>/dev/null || true
+fi
+echo -e "${GREEN}   ✓ Node.js $(node --version 2>/dev/null) + Yarn $(yarn --version 2>/dev/null) installed${NC}"
 
 # ============================================================================
 # INSTALL PHP 8.3+
@@ -348,7 +346,7 @@ if [ ! -d "vendor" ] || [ ! -f "vendor/autoload.php" ]; then
     rm -f composer.lock
     rm -rf vendor/
     composer clear-cache 2>/dev/null || true
-    
+
     if COMPOSER_ALLOW_SUPERUSER=1 $PHP_BIN $(which composer) install \
         --no-dev --optimize-autoloader --no-interaction 2>&1 | tee /tmp/composer-install.log; then
         echo -e "${GREEN}   ✓ Dependencies installed${NC}"
@@ -360,12 +358,14 @@ else
     echo -e "${GREEN}   ✓ Dependencies already installed${NC}"
 fi
 
+# Fix EditFiles.php Filament compatibility bug
+sed -i 's/public static function getUrl(array \$parameters = \[\], bool \$isAbsolute = true, ?string \$panel = null, ?Model \$tenant = null, bool \$shouldGuessMissingParameters = false): string/public static function getUrl(array $parameters = [], bool $isAbsolute = true, ?string $panel = null, ?Model $tenant = null, bool $shouldGuessMissingParameters = false, ?string $configuration = null): string/' /var/www/pelican/app/Filament/Server/Resources/Files/Pages/EditFiles.php
+
 # ============================================================================
 # CONFIGURE ENVIRONMENT (CRITICAL: PRESERVE APP_KEY!)
 # ============================================================================
 echo -e "${CYAN}[10/20] Configuring environment...${NC}"
 
-# CRITICAL: Check for existing APP_KEY
 if [ -f .env ] && grep -q "^APP_KEY=base64:" .env; then
     EXISTING_APP_KEY=$(grep "^APP_KEY=" .env | cut -d'=' -f2)
     echo -e "${GREEN}   ✓ Found existing APP_KEY, preserving it${NC}"
@@ -376,10 +376,8 @@ else
     HAS_EXISTING_KEY=false
 fi
 
-# Start with .env.example
 cp .env.example .env
 
-# Restore or generate APP_KEY
 if [ "$HAS_EXISTING_KEY" = true ]; then
     echo -e "${GREEN}   ✓ Restoring APP_KEY (prevents MAC errors)${NC}"
     sed -i "s|^APP_KEY=.*|APP_KEY=${EXISTING_APP_KEY}|" .env
@@ -388,9 +386,7 @@ else
     $PHP_BIN artisan key:generate --force --quiet
 fi
 
-# Write database configuration
 cat >> .env <<ENVEOF
-
 # Database Configuration
 DB_CONNECTION=${DB_DRIVER}
 DB_HOST=${DB_HOST}
@@ -398,18 +394,15 @@ DB_PORT=${DB_PORT}
 DB_DATABASE=${DB_NAME}
 DB_USERNAME=${DB_USER}
 DB_PASSWORD=${DB_PASS}
-
-# Redis Configuration  
+# Redis Configuration
 REDIS_HOST=${REDIS_HOST}
 REDIS_PORT=${REDIS_PORT}
 REDIS_PASSWORD=${REDIS_PASS}
-
 # Cache & Session
 CACHE_DRIVER=redis
 CACHE_STORE=redis
 SESSION_DRIVER=redis
 QUEUE_CONNECTION=redis
-
 # Mail Configuration
 MAIL_MAILER=smtp
 MAIL_HOST=${MAIL_HOST}
@@ -419,7 +412,6 @@ MAIL_PASSWORD=${MAIL_PASS}
 MAIL_ENCRYPTION=tls
 MAIL_FROM_ADDRESS=${MAIL_FROM}
 MAIL_FROM_NAME="${MAIL_FROM_NAME}"
-
 # App Configuration
 APP_URL=https://${PANEL_DOMAIN}
 APP_TIMEZONE=UTC
@@ -429,14 +421,12 @@ ENVEOF
 
 if [ "$DB_DRIVER" = "pgsql" ]; then
     cat >> .env <<PGEOF
-
 # PostgreSQL Optimizations
 DB_SSLMODE=prefer
 DB_SCHEMA=public
 PGEOF
 fi
 
-# Verify
 ACTUAL_DB=$(grep "^DB_CONNECTION=" .env | cut -d'=' -f2)
 if [ "$ACTUAL_DB" != "$DB_DRIVER" ]; then
     sed -i "s/^DB_CONNECTION=.*/DB_CONNECTION=${DB_DRIVER}/" .env
@@ -457,24 +447,30 @@ chown -R www-data:www-data storage/logs
 echo -e "${GREEN}   ✓ Permissions set${NC}"
 
 # ============================================================================
-# CONFIGURE PHP-FPM
+# CONFIGURE PHP-FPM (port 9000 - fixes 502)
 # ============================================================================
 echo -e "${CYAN}[12/20] Configuring PHP-FPM...${NC}"
 
 if [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
     sed -i 's|listen = /run/php/php.*-fpm.sock|listen = 127.0.0.1:9000|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
     sed -i 's|;listen.allowed_clients = 127.0.0.1|listen.allowed_clients = 127.0.0.1|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    # Reduce workers to save RAM
+    sed -i 's/^pm.max_children.*/pm.max_children = 5/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^pm.start_servers.*/pm.start_servers = 2/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^pm.min_spare_servers.*/pm.min_spare_servers = 1/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^pm.max_spare_servers.*/pm.max_spare_servers = 3/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
 fi
 
 if [ "$HAS_SYSTEMD" = true ]; then
     systemctl restart php${PHP_VERSION}-fpm 2>/dev/null || service php${PHP_VERSION}-fpm restart 2>/dev/null
 else
+    mkdir -p /run/php
     pkill php-fpm 2>/dev/null || true
     /usr/sbin/php-fpm${PHP_VERSION} -D 2>/dev/null || true
 fi
 
 sleep 1
-echo -e "${GREEN}   ✓ PHP-FPM configured${NC}"
+echo -e "${GREEN}   ✓ PHP-FPM configured on port 9000${NC}"
 
 # ============================================================================
 # CONFIGURE NGINX
@@ -488,30 +484,29 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
 
 cat > /etc/nginx/sites-available/pelican.conf <<'NGINXEOF'
 server_tokens off;
-
 server {
     listen 0.0.0.0:8443 ssl http2;
     listen [::]:8443 ssl http2;
-    
-    server_name _;
 
+    server_name _;
     ssl_certificate /etc/ssl/pelican/cert.pem;
     ssl_certificate_key /etc/ssl/pelican/key.pem;
-
     root /var/www/pelican/public;
     index index.php;
-
     access_log /var/log/nginx/pelican.app-access.log;
     error_log  /var/log/nginx/pelican.app-error.log error;
-
     client_max_body_size 100m;
     client_body_timeout 120s;
     sendfile off;
-
+    add_header X-Content-Type-Options nosniff;
+    add_header X-XSS-Protection "1; mode=block";
+    add_header X-Robots-Tag none;
+    add_header Content-Security-Policy "frame-ancestors 'self'";
+    add_header X-Frame-Options DENY;
+    add_header Referrer-Policy same-origin;
     location / {
         try_files $uri $uri/ /index.php?$query_string;
     }
-
     location ~ \.php$ {
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         fastcgi_pass 127.0.0.1:9000;
@@ -527,7 +522,6 @@ server {
         fastcgi_send_timeout 300;
         fastcgi_read_timeout 300;
     }
-
     location ~ /\.ht {
         deny all;
     }
@@ -572,43 +566,17 @@ fi
 echo -e "${GREEN}   ✓ Database migrations complete${NC}"
 
 # ============================================================================
-# SETUP QUEUE WORKER
+# SETUP QUEUE WORKER (Supervisor - no systemd needed)
 # ============================================================================
 echo -e "${CYAN}[15/20] Setting up queue worker...${NC}"
 
 pkill -9 -f "artisan queue:work" 2>/dev/null || true
 sleep 2
 
-if [ "$HAS_SYSTEMD" = true ]; then
-    cat > /etc/systemd/system/pelican-queue.service <<'QEOF'
-[Unit]
-Description=Pelican Queue Worker
-After=redis-server.service
+apt install -y supervisor 2>/dev/null || true
+mkdir -p /var/log/supervisor /etc/supervisor/conf.d
 
-[Service]
-User=www-data
-Group=www-data
-Restart=always
-ExecStart=/usr/bin/php8.3 /var/www/pelican/artisan queue:work --sleep=3 --tries=3 --timeout=90 --max-jobs=1000
-StartLimitInterval=180
-StartLimitBurst=30
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-QEOF
-
-    systemctl daemon-reload
-    systemctl enable pelican-queue.service 2>/dev/null || true
-    systemctl restart pelican-queue.service 2>/dev/null || HAS_SYSTEMD=false
-fi
-
-if [ "$HAS_SYSTEMD" = false ]; then
-    apt install -y supervisor 2>/dev/null || true
-    
-    mkdir -p /var/log/supervisor /etc/supervisor/conf.d
-    
-    cat > /etc/supervisor/conf.d/pelican-queue.conf <<'QEOF'
+cat > /etc/supervisor/conf.d/pelican-queue.conf <<'QEOF'
 [program:pelican-queue]
 command=/usr/bin/php8.3 /var/www/pelican/artisan queue:work redis --sleep=3 --tries=3 --timeout=90 --max-jobs=1000
 directory=/var/www/pelican
@@ -621,14 +589,13 @@ stopasgroup=true
 killasgroup=true
 QEOF
 
-    pkill supervisord 2>/dev/null || true
-    sleep 2
-    supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
-    sleep 3
-    supervisorctl reread 2>/dev/null
-    supervisorctl update 2>/dev/null
-    supervisorctl restart pelican-queue 2>/dev/null
-fi
+pkill supervisord 2>/dev/null || true
+sleep 2
+supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
+sleep 3
+supervisorctl reread 2>/dev/null || true
+supervisorctl update 2>/dev/null || true
+supervisorctl restart pelican-queue 2>/dev/null || true
 
 sleep 2
 if ps aux | grep -v grep | grep "queue:work" >/dev/null; then
@@ -685,7 +652,7 @@ sleep 3
 echo -e "${GREEN}   ✓ Cloudflare Tunnel installed${NC}"
 
 # ============================================================================
-# CLEAR CACHES
+# CLEAR CACHES (no config:cache - breaks plugins)
 # ============================================================================
 echo -e "${CYAN}[18/20] Clearing all caches...${NC}"
 
@@ -695,13 +662,12 @@ $PHP_BIN artisan config:clear >/dev/null 2>&1 || true
 $PHP_BIN artisan cache:clear >/dev/null 2>&1 || true
 $PHP_BIN artisan view:clear >/dev/null 2>&1 || true
 $PHP_BIN artisan route:clear >/dev/null 2>&1 || true
+$PHP_BIN artisan route:cache >/dev/null 2>&1 || true
 
-# Delete compiled views to prevent MAC errors
 rm -rf storage/framework/views/* 2>/dev/null || true
 rm -rf storage/framework/cache/* 2>/dev/null || true
 
-# Cache config for performance
-$PHP_BIN artisan config:cache >/dev/null 2>&1 || true
+# NOTE: config:cache intentionally skipped - breaks dynamic plugins
 
 if [ "$HAS_SYSTEMD" = true ]; then
     systemctl restart php${PHP_VERSION}-fpm nginx 2>/dev/null || {
@@ -709,6 +675,7 @@ if [ "$HAS_SYSTEMD" = true ]; then
         pkill nginx && nginx
     }
 else
+    mkdir -p /run/php
     pkill php-fpm 2>/dev/null || true
     /usr/sbin/php-fpm${PHP_VERSION} -D 2>/dev/null || true
     pkill nginx 2>/dev/null || true
@@ -779,8 +746,8 @@ echo ""
 echo -e "${CYAN}Verifying installation...${NC}"
 
 CHECKS=0
-[ "$(netstat -tulpn 2>/dev/null | grep -c ":9000")" -gt 0 ] && { echo -e "${GREEN}   ✓ PHP-FPM running${NC}"; ((CHECKS++)); }
-[ "$(netstat -tulpn 2>/dev/null | grep -c ":8443")" -gt 0 ] && { echo -e "${GREEN}   ✓ Nginx running${NC}"; ((CHECKS++)); }
+[ "$(netstat -tulpn 2>/dev/null | grep -c ":9000")" -gt 0 ] && { echo -e "${GREEN}   ✓ PHP-FPM running on port 9000${NC}"; ((CHECKS++)); }
+[ "$(netstat -tulpn 2>/dev/null | grep -c ":8443")" -gt 0 ] && { echo -e "${GREEN}   ✓ Nginx running on port 8443${NC}"; ((CHECKS++)); }
 [ "$(ps aux | grep -v grep | grep -c "queue:work")" -gt 0 ] && { echo -e "${GREEN}   ✓ Queue worker${NC}"; ((CHECKS++)); }
 [ "$(ps aux | grep -v grep | grep -c cloudflared)" -gt 0 ] && { echo -e "${GREEN}   ✓ Cloudflare Tunnel${NC}"; ((CHECKS++)); }
 [ -f "/var/www/pelican/vendor/autoload.php" ] && { echo -e "${GREEN}   ✓ Dependencies${NC}"; ((CHECKS++)); }
@@ -794,12 +761,6 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║  Panel Installation Complete! (${CHECKS}/6)    ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
 echo ""
-
-if [ "$DB_DRIVER" = "pgsql" ]; then
-    echo -e "${CYAN}🚀 POSTGRESQL OPTIMIZED${NC}"
-    echo -e "${GREEN}   ✓ Redis caching enabled${NC}"
-    echo ""
-fi
 
 echo -e "${RED}╔════════════════════════════════════════╗${NC}"
 echo -e "${RED}║  🔐 CRITICAL: BACKUP YOUR CONFIG!     ║${NC}"

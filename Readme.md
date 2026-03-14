@@ -1,867 +1,677 @@
-# Pelican Panel & Wings Complete Setup Guide
+# 🚀 NexusBot — Ubuntu VPS + Pelican Panel on Google IDX
 
-> **Universal Installation Guide** - Works on VPS, Dedicated Servers, GitHub Codespaces, Docker Containers, and Sandbox environments
+> **Complete guide** for running a 24/7 Ubuntu server on Google IDX with Pelican Panel, Wings, Cloudflare Tunnel, Tailscale, and Remote Desktop.
+
+**Created by NexusTechPro** | [GitHub](https://github.com/Adexx-11234/newrepo)
+
+---
 
 ## 📋 Table of Contents
+
 1. [Overview](#overview)
 2. [Architecture](#architecture)
 3. [Prerequisites](#prerequisites)
-4. [Part 1: Panel Installation](#part-1-panel-installation)
-5. [Part 2: Wings Installation](#part-2-wings-installation)
-6. [Part 3: Cloudflare Tunnel Setup](#part-3-cloudflare-tunnel-setup)
-7. [Part 4: Creating Nodes in Panel](#part-4-creating-nodes-in-panel)
-8. [Part 5: Connecting Wings to Panel](#part-5-connecting-wings-to-panel)
-9. [Troubleshooting](#troubleshooting)
-10. [Common Issues & Solutions](#common-issues--solutions)
-11. [Uninstallation](#uninstallation)
+4. [Quick Start](#quick-start)
+5. [Part 1 — Ubuntu VPS on Google IDX](#part-1--ubuntu-vps-on-google-idx)
+6. [Part 2 — Server Setup (SSH + RDP + Tailscale)](#part-2--server-setup-ssh--rdp--tailscale)
+7. [Part 3 — 24/7 Keepalive Guide](#part-3--247-keepalive-guide)
+8. [Part 4 — Pelican Panel Installation](#part-4--pelican-panel-installation)
+9. [Part 5 — Pelican Wings Installation](#part-5--pelican-wings-installation)
+10. [Part 6 — Cloudflare Tunnel Setup](#part-6--cloudflare-tunnel-setup)
+11. [Part 7 — User Registration & Resource Limits](#part-7--user-registration--resource-limits)
+12. [Part 8 — Restart All Services](#part-8--restart-all-services)
+13. [dev.nix Configuration](#devnix-configuration)
+14. [Troubleshooting](#troubleshooting)
+15. [Scripts Reference](#scripts-reference)
 
 ---
 
 ## 🎯 Overview
 
-This guide provides complete instructions for installing Pelican Panel (game server management system) with Wings (node daemon) using **Cloudflare Tunnel** for SSL termination. No need for Let's Encrypt or complex firewall configurations!
+This repository provides everything needed to run a full **Pelican Panel game server management system** on **Google IDX** — completely free using:
 
-**Tested and Working On:**
-- ✅ Ubuntu 20.04, 22.04, 24.04
-- ✅ Debian 11, 12
-- ✅ GitHub Codespaces
-- ✅ Docker Containers
-- ✅ Cloud VPS (AWS, DigitalOcean, Vultr, etc.)
-- ✅ Bare Metal Servers
-
-**Key Features:**
-- No Let's Encrypt configuration needed
-- Works in container environments (no systemd required)
-- Automatic SSL via Cloudflare Tunnel
-- Container-safe Docker configuration
-- Handles IPv6 issues automatically
+- 🖥️ **Google IDX** — Free cloud development environment
+- 🐧 **Ubuntu VPS** — QEMU-based Ubuntu VM inside IDX
+- 🐦 **Pelican Panel** — Game server management panel
+- 🔗 **Cloudflare Tunnel** — Free SSL & domain routing
+- 🌐 **Tailscale** — Secure VPN for remote access
+- 🖥️ **xRDP** — Remote desktop connection
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-User Browser
-    ↓ HTTPS (port 443)
-Cloudflare Tunnel
-    ↓
-    ├─→ panel.example.com → localhost:8443 (Nginx + Panel)
-    │                           ↓
-    │                    Laravel/PHP Application
-    │
-    └─→ node-1.example.com → localhost:8080 (Wings)
-                                ↓
-                         Docker Containers
-                         (Game Servers)
+Your PC / Phone (anywhere)
+        │
+        ▼
+  Tailscale VPN
+        │
+        ▼
+Google IDX (Ubuntu VM)
+        │
+   ┌────┴────────────────────┐
+   │                         │
+   ▼                         ▼
+xRDP (port 3389)      Cloudflare Tunnel
+Remote Desktop              │
+                    ┌───────┴──────────┐
+                    ▼                  ▼
+          panel.nexusbot.qzz.io  node-1.nexusbot.qzz.io
+                    │                  │
+                    ▼                  ▼
+             Nginx :8443          Wings :8080
+                    │                  │
+                    ▼                  ▼
+           Pelican Panel          Docker Containers
+           (PHP/Laravel)          (Game Servers)
 ```
 
-**Important Points:**
-- Panel runs on **port 8443** internally
-- Wings runs on **port 8080** internally
-- Cloudflare Tunnel provides HTTPS on **port 443** externally
-- Users always connect via port 443 (standard HTTPS)
+**Port Reference:**
+
+| Service | Internal Port | External Port |
+|---------|:---:|:---:|
+| Pelican Panel (Nginx) | 8443 | 443 (via Cloudflare) |
+| Wings Node | 8080 | 443 (via Cloudflare) |
+| xRDP | 3389 | Tailscale only |
+| SSH | 22 | Tailscale only |
+| Wings SFTP | 2022 | Internal |
 
 ---
 
 ## 📦 Prerequisites
 
-### 1. Domain & DNS (Managed by Cloudflare)
+Before starting, you need:
 
-You need a domain managed by Cloudflare with these subdomains:
-- `panel.example.com` (for Panel)
-- `node-1.example.com` (for Wings node)
+- ✅ **Google Account** — for IDX access
+- ✅ **Cloudflare Account** — free at [cloudflare.com](https://cloudflare.com)
+- ✅ **Domain on Cloudflare** — any domain managed by Cloudflare
+- ✅ **Supabase / PostgreSQL** — free database at [supabase.com](https://supabase.com)
+- ✅ **Tailscale Account** — free at [tailscale.com](https://tailscale.com)
+- ✅ **Windows PC** — for Remote Desktop Connection
 
-### 2. Cloudflare Tunnel Token
-
-**Steps to get your tunnel token:**
-
-1. Go to: https://one.dash.cloudflare.com/
-2. Navigate: **Zero Trust** → **Networks** → **Tunnels**
-3. Click **Create a tunnel**
-4. Name it (e.g., "pelican-tunnel")
-5. Choose **Cloudflared**
-6. Copy the tunnel token (starts with `eyJ...`)
-7. **Don't configure routes yet** - we'll do that after installation
-
-### 3. Database
-
-Either:
-- **Local:** Install PostgreSQL or MySQL/MariaDB
-- **Remote:** Use a managed database service
-
-You'll need:
-- Database host
-- Database port
-- Database name
-- Database username
-- Database password
-
-### 4. Email (SMTP)
-
-For user notifications and password resets:
-- SMTP host (e.g., smtp.gmail.com)
-- SMTP port (usually 587)
-- SMTP username
-- SMTP password
-
-### 5. System Requirements
-
-**Minimum:**
-- 2 CPU cores
-- 2GB RAM
-- 20GB disk space
-- Root access
-
-**Recommended:**
-- 4 CPU cores
-- 4GB RAM
-- 50GB+ disk space
+**Subdomains needed:**
+```
+panel.yourdomain.com     → Pelican Panel
+node-1.yourdomain.com    → Wings Node
+```
 
 ---
 
-## 🎨 Part 1: Panel Installation
+## ⚡ Quick Start
 
-### Step 1: Download Installation Script
-
-```bash
-# Download the panel installation script
-wget https://raw.githubusercontent.com/Adexx-11234/newrepo/main/panel.sh -O panel.sh
-
-# Make it executable
-chmod +x panel.sh
-```
-
-### Step 2: Run Installation
+### Run the NexusBot Menu:
 
 ```bash
-sudo ./panel.sh
+# On your Ubuntu server inside IDX:
+curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/main.sh | bash
 ```
 
-### Step 3: Answer the Prompts
-
-The script will ask for:
-
-```
-Panel domain: panel.example.com
-Cloudflare Tunnel Token: eyJ... (paste your token)
-Database type: 1 (PostgreSQL) or 2 (MySQL)
-Database Host: localhost (or remote host)
-Database Port: 5432 (PostgreSQL) or 3306 (MySQL)
-Database Name: pelican
-Database Username: pelican
-Database Password: (your secure password)
-Redis Host: 127.0.0.1
-Redis Port: 6379
-Redis Password: (leave empty or set one)
-SMTP Host: smtp.gmail.com
-SMTP Port: 587
-SMTP Username: your@email.com
-SMTP Password: (your app password)
-From Email: noreply@example.com
-From Name: Pelican Panel
-```
-
-### Step 4: Complete Panel Setup
-
-After installation completes:
+Or download and run:
 
 ```bash
-# Navigate to panel directory
+wget https://raw.githubusercontent.com/Adexx-11234/newrepo/main/main.sh
+chmod +x main.sh
+bash main.sh
+```
+
+This opens the **NexusBot All-In-One Menu** where you can install everything.
+
+---
+
+## Part 1 — Ubuntu VPS on Google IDX
+
+### Step 1 — Set Up dev.nix
+
+In your Google IDX project, open `.idx/dev.nix` and use this configuration:
+
+```nix
+{ pkgs, ... }: {
+  channel = "stable-24.05";
+
+  packages = with pkgs; [
+    unzip
+    openssh
+    git
+    qemu_kvm
+    qemu
+    sudo
+    cdrkit
+    cloud-utils
+    curl
+    wget
+    nano
+    screen
+    tmux
+    virtiofsd
+    sshpass
+  ];
+
+  env = {
+    EDITOR = "nano";
+    QEMU_AUDIO_DRV = "none";
+  };
+
+  idx = {
+    extensions = [
+      "Dart-Code.flutter"
+      "Dart-Code.dart-code"
+    ];
+
+    workspace = {
+      onCreate = { };
+      onStart = { };
+    };
+
+    previews = {
+      enable = false;
+    };
+  };
+}
+```
+
+Save the file — IDX will rebuild the environment automatically.
+
+### Step 2 — Install Ubuntu VM
+
+```bash
+# Run the VPS installer
+bash <(curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/vps.sh)
+```
+
+This will:
+- Download Ubuntu cloud image
+- Set up QEMU/KVM virtual machine
+- Configure cloud-init
+- Boot into Ubuntu
+
+### Step 3 — Access Your Ubuntu Server
+
+After boot, SSH into it:
+
+```bash
+ssh root@localhost -p 2222
+```
+
+Or use the VM manager menu to connect automatically.
+
+---
+
+## Part 2 — Server Setup (SSH + RDP + Tailscale)
+
+Run this **inside your Ubuntu VM** to set up all remote access tools:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/nexus-setup.sh | bash
+```
+
+### What it installs:
+
+| Component | Purpose |
+|-----------|---------|
+| **OpenSSH** | Remote terminal access |
+| **Tailscale** | Secure VPN (access from anywhere) |
+| **xRDP + XFCE** | Full remote desktop at 1280x720 |
+| **Firefox** | Browser inside remote desktop |
+| **sshx** | Terminal sharing (single instance) |
+| **Keepalive Service** | Prevents IDX from shutting down |
+
+### After setup, connect from Windows:
+
+**SSH:**
+```cmd
+ssh root@YOUR_TAILSCALE_IP
+```
+
+**Remote Desktop:**
+```
+Win + R → mstsc → Enter YOUR_TAILSCALE_IP → Connect
+```
+
+> 💡 Get your Tailscale IP by running: `tailscale ip -4`
+
+---
+
+## Part 3 — 24/7 Keepalive Guide
+
+> Google IDX shuts down after ~2 hours of inactivity. Follow these steps to keep it running 24/7.
+
+### Step 1 — Get your Tailscale IP
+```bash
+tailscale ip -4
+```
+
+### Step 2 — Connect via Remote Desktop
+- Press `Win + R` → type `mstsc` → Enter
+- Enter your **Tailscale IP**
+- Login with your Ubuntu username and password
+
+### Step 3 — Open Firefox inside RDP
+In the RDP terminal:
+```bash
+DISPLAY=:10 firefox &
+```
+
+### Step 4 — Install Auto Refresh Extension
+1. In Firefox, go to the **Extensions store**
+2. Search for **"Auto Refresh Page"**
+3. Click **Add to Firefox**
+
+### Step 5 — Open Google IDX
+1. Open a new tab
+2. Go to: `https://idx.google.com`
+3. Login with your Google account
+4. Open your project
+
+### Step 6 — Set Auto Refresh
+1. Click the **Auto Refresh** extension icon
+2. Set interval to **20 minutes**
+3. Enable it on the IDX tab
+
+### Step 7 — Open Terminal in IDX
+In the IDX terminal, run the keepalive:
+```bash
+while true; do echo "alive $(date)"; sleep 60; done
+```
+
+### ✅ Result
+Your server will now stay active **24/7** even after you close your PC — the RDP session running inside IDX keeps the browser active, and the auto-refresh prevents IDX timeout.
+
+---
+
+## Part 4 — Pelican Panel Installation
+
+### Step 1 — Get Cloudflare Tunnel Token
+
+1. Go to: [https://one.dash.cloudflare.com](https://one.dash.cloudflare.com)
+2. Navigate: **Zero Trust → Networks → Tunnels**
+3. Click **Create a tunnel** → Name it (e.g., `nexusserver`)
+4. Choose **Cloudflared**
+5. Copy the tunnel token (`eyJ...`)
+
+### Step 2 — Prepare Database
+
+Use [Supabase](https://supabase.com) (free PostgreSQL):
+1. Create new project
+2. Go to **Settings → Database**
+3. Copy connection details:
+   - Host, Port, Database, Username, Password
+
+### Step 3 — Install Panel
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/panel.sh | bash
+```
+
+**You will be asked for:**
+```
+Panel domain:           panel.yourdomain.com
+Cloudflare Token:       eyJ... (from step 1)
+Database Type:          1 (PostgreSQL)
+Database Host:          aws-1-eu-west-1.pooler.supabase.com
+Database Port:          5432
+Database Name:          postgres
+Database Username:      postgres.xxxxx
+Database Password:      your_password
+Redis Host:             127.0.0.1
+Redis Port:             6379
+```
+
+### Step 4 — Create Admin User
+
+```bash
 cd /var/www/pelican
-
-# Run database migrations
-php artisan migrate --force
-
-# Create admin user
 php artisan p:user:make
 ```
 
-Follow the prompts to create your admin account.
+### Step 5 — Configure Cloudflare Tunnel for Panel
 
-### Step 5: Configure Cloudflare Tunnel for Panel
+1. Go to your tunnel → **Public Hostnames → Add**
+2. Fill in:
 
-1. Go to: https://one.dash.cloudflare.com/
-2. Navigate: **Zero Trust** → **Networks** → **Tunnels**
-3. Click your tunnel → **Configure**
-4. Click **Public Hostnames** tab
-5. Click **Add a public hostname**
-
-**Panel Route Configuration:**
 ```
-Subdomain: panel
-Domain: example.com
-Path: (leave empty)
-
-Service:
-  Type: HTTPS
-  URL: localhost:8443
-
-Additional application settings:
-  ✅ No TLS Verify: ON (CRITICAL!)
+Subdomain:    panel
+Domain:       yourdomain.com
+Service Type: HTTPS
+URL:          localhost:8443
+No TLS Verify: ✅ ON  ← CRITICAL!
 ```
 
-6. Click **Save hostname**
-7. Wait 30 seconds for DNS propagation
-8. Access your panel: `https://panel.example.com`
+3. Save → wait 30 seconds
+4. Access: `https://panel.yourdomain.com`
 
 ---
 
-## 🚀 Part 2: Wings Installation
+## Part 5 — Pelican Wings Installation
 
-### Step 1: Download Wings Installation Script
+### Step 1 — Create Node in Panel
 
-**On your Wings server** (can be same as Panel or different):
+1. Login to Panel → **Admin → Nodes → Create New**
+2. Fill in:
+
+```
+Name:           Node 1
+FQDN:           node-1.yourdomain.com
+Port:           8443           ← NOT 8080!
+Communicate over SSL:     HTTPS (SSL)
+Scheme:         https
+```
+
+3. Save node
+
+### Step 2 — Get API Token
+
+1. **Admin → API Keys → Create**
+2. Copy the token (starts with `papp_`)
+
+### Step 3 — Install Wings
 
 ```bash
-# Download the wings installation script
-wget https://raw.githubusercontent.com/Adexx-11234/newrepo/main/wings.sh -O wings.sh
-
-# Make it executable
-chmod +x wings.sh
+curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/wings.sh | bash
 ```
 
-### Step 2: Run Installation
+**You will be asked for:**
+```
+Node domain:    node-1.yourdomain.com
+Panel URL:      https://panel.yourdomain.com
+API Token:      papp_xxxxxxxxxxxxxxxx
+Node ID:        1
+CF Token:       eyJ... (same or separate tunnel token)
+```
 
+### Step 4 — Configure Cloudflare Tunnel for Wings
+
+1. Go to your tunnel → **Public Hostnames → Add**
+2. Fill in:
+
+```
+Subdomain:     node-1
+Domain:        yourdomain.com
+Service Type:  HTTPS
+URL:           localhost:8080
+No TLS Verify: ✅ ON  ← CRITICAL!
+```
+
+### Step 5 — Verify Connection
+
+In Panel → **Admin → Nodes** — your node should show a **green heart ❤️**
+
+If red, check:
 ```bash
-sudo ./wings.sh
-```
-
-### Step 3: Answer the Prompts
-
-The script will ask for:
-
-```
-Node domain: node-1.example.com
-Panel URL: https://panel.example.com
-Panel API Token: papp_xxxxxxxxxxxx
-Node ID: 1 (usually 1 for first node)
-SSL Certificate Setup: 1 (Self-signed - recommended)
-```
-
-**Where to get the Panel Token:**
-1. Login to your Panel: `https://panel.example.com`
-2. Go to: **Admin** → **Nodes** → Click your node
-3. Click **Configuration** tab
-4. Look for the auto-config command - copy the token that starts with `papp_`
-
-The script will automatically:
-- ✅ Install and configure Docker
-- ✅ Download Wings
-- ✅ Create SSL certificates
-- ✅ Run `wings configure` command
-- ✅ **Automatically fix IPv6 for containers** (no manual editing!)
-- ✅ Apply all necessary configuration fixes
-- ✅ Create systemd service (if available)
-
-### Step 4: Verify Configuration
-
----
-
-## 🔧 Part 3: Cloudflare Tunnel Setup for Wings
-
-### Step 1: Configure Cloudflare Tunnel Route
-
-1. Go to: https://one.dash.cloudflare.com/
-2. Navigate: **Zero Trust** → **Networks** → **Tunnels**
-3. Click your tunnel → **Configure**
-4. Click **Public Hostnames** tab
-5. Click **Add a public hostname**
-
-**Wings Route Configuration:**
-```
-Subdomain: node-1
-Domain: example.com
-Path: (leave empty)
-
-Service:
-  Type: HTTPS
-  URL: localhost:8080
-
-Additional application settings:
-  ✅ No TLS Verify: ON (CRITICAL!)
-```
-
-6. Click **Save hostname**
-
-### Step 2: Install Cloudflared on Wings Server
-
-```bash
-# Download cloudflared
-wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-
-# Install
-sudo dpkg -i cloudflared-linux-amd64.deb
-
-# If dpkg fails, fix dependencies
-sudo apt --fix-broken install -y
-sudo dpkg -i cloudflared-linux-amd64.deb
-
-# Install tunnel service (use YOUR token from Cloudflare dashboard)
-sudo cloudflared service install YOUR_TUNNEL_TOKEN_HERE
-```
-
-### Step 3: Start Cloudflared
-
-**With systemd:**
-```bash
-sudo systemctl start cloudflared
-sudo systemctl enable cloudflared
-sudo systemctl status cloudflared
-```
-
-**Without systemd (containers):**
-```bash
-sudo cloudflared tunnel run YOUR_TUNNEL_TOKEN > /var/log/cloudflared.log 2>&1 &
-
-# Check it's running
-ps aux | grep cloudflared
-```
-
-### Step 4: Test Tunnel
-
-```bash
-# Test connectivity
-curl https://node-1.example.com/api/system
-```
-
-Should return: `{"error":"The required authorization heads were not present in the request."}`
-
-This is **correct!** The auth error means Wings endpoint is reachable.
-
----
-
-## 🎮 Part 4: Creating Nodes in Panel
-
-### Step 1: Access Panel Admin
-
-1. Login to: `https://panel.example.com`
-2. Navigate to: **Admin** → **Nodes**
-3. Click **Create New**
-
-### Step 2: Node Configuration
-
-**CRITICAL - Use These Exact Settings:**
-
-```
-Basic Details:
-├─ Name: Node 1
-├─ Description: Primary game server node
-├─ Location: (Select or create a location)
-├─ FQDN: node-1.example.com
-├─ Scheme: https
-├─ Behind Proxy: ✅ YES (CRITICAL!)
-├─ Daemon Port: 443
-└─ Memory & Disk: Set as needed
-
-Connection:
-├─ Communicate Over SSL: ✅ YES
-└─ Port: 443 (NOT 8080!)
-
-Advanced:
-├─ Memory Over-Allocation: 0
-├─ Disk Over-Allocation: 0
-└─ Daemon Server File Directory: /var/lib/pelican/volumes
-```
-
-**Why These Settings Matter:**
-
-| Setting | Value | Reason |
-|---------|-------|--------|
-| FQDN | node-1.example.com | Your Cloudflare Tunnel domain |
-| Port | 443 | Cloudflare Tunnel listens on 443 |
-| Behind Proxy | YES | Cloudflare terminates SSL |
-| Scheme | https | External connections use HTTPS |
-
-**Common Mistakes:**
-- ❌ Port 8080 (Wings internal port - don't use!)
-- ❌ Behind Proxy: NO (causes SSL errors!)
-- ❌ Scheme: http (always use https!)
-
-### Step 3: Save Node
-
-Click **Create Node** - the node will show as **offline (red heart)** until Wings is configured.
-
----
-
-## 🔗 Part 5: Connecting Wings to Panel
-
-### Step 1: Get Auto-Configuration Command
-
-1. In Panel, go to: **Admin** → **Nodes** → Click your node
-2. Click the **Configuration** tab
-3. You'll see a command like:
-
-```bash
-sudo wings configure --panel-url https://panel.example.com --token papp_xxxxxxxxxxxx --node 1
-```
-
-4. **Copy this entire command**
-
-### Step 2: Configure Wings
-
-**On your Wings server**, run the command you copied:
-
-```bash
-sudo wings configure --panel-url https://panel.example.com --token papp_xxxxxxxxxxxx --node 1
-```
-
-Expected output:
-```
-Successfully configured wings.
-```
-
-This creates `/etc/pelican/config.yml` with Panel's configuration.
-
-### Step 3: CRITICAL - Fix IPv6 for Container Environments
-
-**⚠️ If running in Codespaces, Docker container, or any container environment:**
-
-```bash
-# Edit the config
-sudo nano /etc/pelican/config.yml
-```
-
-Find the `docker:` section and make these changes:
-
-**BEFORE (causes crashes):**
-```yaml
-docker:
-  network:
-    IPv6: true  # ← This causes iptables errors!
-    interfaces:
-      v4:
-        subnet: 172.18.0.0/16
-        gateway: 172.18.0.1
-      v6:
-        subnet: fdba:17c8:6c94::/64
-        gateway: fdba:17c8:6c94::1011
-```
-
-**AFTER (works in containers):**
-```yaml
-docker:
-  network:
-    IPv6: false  # ← Changed to false
-    interfaces:
-      v4:
-        subnet: 172.18.0.0/16
-        gateway: 172.18.0.1
-      # v6:  # ← Commented out or removed
-      #   subnet: fdba:17c8:6c94::/64
-      #   gateway: fdba:17c8:6c94::1011
-```
-
-**Save:** Ctrl+X, then Y, then Enter
-
-### Step 4: Verify Wings Configuration
-
-```bash
-cat /etc/pelican/config.yml
-```
-
-**Key settings should be:**
-
-```yaml
-api:
-  host: 0.0.0.0
-  port: 8080  # Wings listens internally on 8080
-  ssl:
-    enabled: true
-    cert: /etc/letsencrypt/live/node-1.example.com/fullchain.pem
-    key: /etc/letsencrypt/live/node-1.example.com/privkey.pem
-
-remote: https://panel.example.com
-
-docker:
-  network:
-    IPv6: false  # MUST be false for containers
-```
-
-### Step 5: Start Wings
-
-**With systemd:**
-```bash
-# Enable and start Wings
-sudo systemctl enable --now wings
-
-# Check status
-sudo systemctl status wings
-
-# View logs
-sudo journalctl -u wings -f
-```
-
-**Without systemd (containers):**
-```bash
-# Start Wings in background
-sudo nohup /usr/local/bin/wings > /tmp/wings.log 2>&1 &
-
-# Check it's running
-ps aux | grep wings
-
-# View logs
-tail -f /var/log/pelican/wings.log
+# Wings logs
 tail -f /tmp/wings.log
-```
 
-### Step 6: Test Wings Connection
+# Cloudflare logs
+tail -f /var/log/cloudflared-wings.log
 
-```bash
-# Test local Wings API
+# Test Wings API
 curl -k https://localhost:8080/api/system
-
-# Test through Cloudflare Tunnel
-curl https://node-1.example.com/api/system
 ```
 
-**Both should return:**
+Expected response (this is correct!):
 ```json
 {"error":"The required authorization heads were not present in the request."}
 ```
 
-**This is correct!** The auth error means Wings is responding properly.
+---
 
-### Step 7: Verify in Panel
+## Part 6 — Cloudflare Tunnel Setup
 
-1. Go to Panel: **Admin** → **Nodes**
-2. Your node should show a **green heart** ❤️ (healthy)
-3. If red, wait 30-60 seconds and refresh
-4. If still red after 2 minutes, see [Troubleshooting](#troubleshooting)
+### Summary of all tunnel routes needed:
+
+| Subdomain | Service | URL | No TLS Verify |
+|-----------|---------|-----|:---:|
+| `panel` | HTTPS | `localhost:8443` | ✅ |
+| `node-1` | HTTPS | `localhost:8080` | ✅ |
+
+### Important Notes:
+- ❌ Never use `http://` — always `https://`
+- ❌ Never put port 443 as the service URL
+- ✅ Always enable **No TLS Verify** (self-signed certs)
+- ✅ Panel: port `8443` | Wings: port `8080`
+
+---
+
+## Part 7 — User Registration & Resource Limits
+
+Enable self-registration so users can sign up and create servers:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/plugin-client.sh | bash
+```
+
+**Default limits set per user:**
+
+| Resource | Default |
+|----------|---------|
+| CPU | 200% (2 cores) |
+| RAM | 4096 MB (4GB) |
+| Disk | 10240 MB (10GB) |
+| Max Servers | 2 |
+| Max Databases | 2 |
+| Max Allocations | 3 |
+| Max Backups | 1 |
+
+### After installation:
+
+1. Go to **Admin → Nodes → Edit Node**
+2. Find **Tags** field
+3. Add: `user_creatable_servers`
+4. Save
+
+> ⚠️ Without this tag, users cannot create servers on the node!
+
+---
+
+## Part 8 — Restart All Services
+
+If anything stops working, restart everything:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/restart.sh | bash
+```
+
+Or manually:
+
+```bash
+# Restart individual services
+sudo systemctl restart nginx
+sudo systemctl restart php8.3-fpm
+sudo systemctl restart redis
+sudo systemctl restart xrdp
+sudo systemctl restart cloudflared
+sudo systemctl restart tailscaled
+
+# Restart Wings
+pkill wings && cd /etc/pelican && nohup wings > /tmp/wings.log 2>&1 &
+
+# Clear Panel cache
+cd /var/www/pelican
+php artisan cache:clear
+php artisan config:clear
+php artisan route:clear
+php artisan view:clear
+```
+
+---
+
+## dev.nix Configuration
+
+This is the required `dev.nix` for Google IDX to support Ubuntu VMs:
+
+```nix
+{ pkgs, ... }: {
+  channel = "stable-24.05";
+
+  packages = with pkgs; [
+    unzip
+    openssh
+    git
+    qemu_kvm
+    qemu
+    sudo
+    cdrkit
+    cloud-utils
+    curl
+    wget
+    nano
+    screen
+    tmux
+    virtiofsd
+    sshpass
+  ];
+
+  env = {
+    EDITOR = "nano";
+    QEMU_AUDIO_DRV = "none";
+  };
+
+  idx = {
+    extensions = [
+      "Dart-Code.flutter"
+      "Dart-Code.dart-code"
+    ];
+
+    workspace = {
+      onCreate = { };
+      onStart = { };
+    };
+
+    previews = {
+      enable = false;
+    };
+  };
+}
+```
+
+**Key packages explained:**
+
+| Package | Purpose |
+|---------|---------|
+| `qemu_kvm` + `qemu` | Run Ubuntu VM |
+| `cdrkit` + `cloud-utils` | Create cloud-init ISO |
+| `openssh` | SSH client/server |
+| `sshpass` | Auto SSH password |
+| `virtiofsd` | Shared filesystem for VM |
+| `tmux` + `screen` | Terminal multiplexer |
 
 ---
 
 ## 🐛 Troubleshooting
 
-### Node Shows Red Heart (Offline)
-
-**Check 1: Cloudflare Tunnel Running**
+### Panel shows 500 error
 ```bash
-# Check if cloudflared is running
-ps aux | grep cloudflared
-
-# For systemd:
-sudo systemctl status cloudflared
-
-# For non-systemd, restart:
-sudo cloudflared tunnel run YOUR_TOKEN > /var/log/cloudflared.log 2>&1 &
+cd /var/www/pelican
+php artisan cache:clear
+php artisan config:clear
+php artisan route:clear
+php artisan migrate --force
+sudo systemctl restart nginx php8.3-fpm
 ```
 
-**Check 2: Wings Running**
+### Wings node shows red heart
 ```bash
-# Check Wings process
+# Check Wings is running
 ps aux | grep wings
 
 # Check logs
-tail -n 50 /var/log/pelican/wings.log
-
-# If stopped, restart:
-# With systemd:
-sudo systemctl restart wings
-
-# Without systemd:
-sudo pkill wings
-sudo nohup /usr/local/bin/wings > /tmp/wings.log 2>&1 &
-```
-
-**Check 3: Test Connections**
-```bash
-# Test Wings locally
-curl -k https://localhost:8080/api/system
-
-# Test through Cloudflare
-curl https://node-1.example.com/api/system
-```
-
-Both should return auth error (which is good!).
-
-**Check 4: Panel Node Settings**
-- FQDN: `node-1.example.com` ✓
-- Port: `443` ✓
-- Behind Proxy: `YES` ✓
-- Scheme: `https` ✓
-
-### Wings Crashes with IPv6 Error
-
-**Error in logs:**
-```
-FATAL: failed to configure docker environment
-iptables failed: ip6tables
-modprobe: ERROR: could not insert 'ip6_tables'
-```
-
-**Solution:**
-```bash
-sudo nano /etc/pelican/config.yml
-
-# Change:
-IPv6: true  →  IPv6: false
-
-# Remove v6 section
+tail -30 /tmp/wings.log
 
 # Restart Wings
-sudo systemctl restart wings  # or nohup command
+pkill wings
+cd /etc/pelican
+nohup wings > /tmp/wings.log 2>&1 &
 ```
 
-### SSL Version Number Error
-
-**Error:**
-```
-cURL error 35: SSL routines:ssl3_get_record:wrong version number
-```
-
-**This means:** Port or proxy configuration is wrong.
-
-**Solution:**
-
-1. **Check Cloudflare Tunnel route:**
-   - URL must be `localhost:8080` (for Wings) or `localhost:8443` (for Panel)
-   - "No TLS Verify" must be ON
-
-2. **Check Panel node settings:**
-   - Port must be `443` (NOT 8080)
-   - Behind Proxy must be `YES`
-
-3. **Test directly:**
-   ```bash
-   # Wings should respond on 8080:
-   curl -k https://localhost:8080/api/system
-   
-   # Panel should respond on 8443:
-   curl -k https://localhost:8443
-   ```
-
-### Permission Denied on Port 443
-
-**Error:**
-```
-FATAL: failed to configure HTTPS server
-error=listen tcp 0.0.0.0:443: bind: permission denied
-```
-
-**Problem:** Wings is trying to listen on port 443.
-
-**Solution:**
+### Can't connect via RDP
 ```bash
-sudo nano /etc/pelican/config.yml
-
-# Change:
-api:
-  port: 8080  # NOT 443!
+sudo systemctl restart xrdp
+# Remove any broken locks
+sudo rm -f /tmp/.X*-lock
+sudo rm -f /tmp/.X11-unix/X*
+sudo systemctl restart xrdp
 ```
 
-Wings should NEVER listen on 443 - Cloudflare Tunnel handles that.
-
-### Docker Network Errors
-
-**Error:**
-```
-Error response from daemon: setting default policy to DROP
-```
-
-**Solution:**
-
-Edit Docker configuration:
+### SSH connection timeout
 ```bash
-sudo nano /etc/docker/daemon.json
+# Check SSH is running
+sudo systemctl status ssh
+
+# Check Tailscale is connected
+tailscale status
+
+# Verify SSH config
+grep -E "PermitRootLogin|PasswordAuthentication|Port" /etc/ssh/sshd_config
 ```
 
-```json
-{
-  "iptables": false,
-  "ip6tables": false,
-  "ipv6": false,
-  "userland-proxy": true,
-  "default-address-pools": [
-    {
-      "base": "172.25.0.0/16",
-      "size": 24
-    }
-  ],
-  "bip": "172.26.0.1/16"
-}
-```
-
-Restart Docker:
+### apt lock error
 ```bash
-# With systemd:
-sudo systemctl restart docker
-
-# Without systemd:
-sudo pkill dockerd
-sudo dockerd > /var/log/docker.log 2>&1 &
+sudo kill -9 $(lsof /var/lib/dpkg/lock-frontend | awk 'NR>1{print $2}')
+sudo rm /var/lib/dpkg/lock-frontend
+sudo rm /var/lib/dpkg/lock
+sudo rm /var/cache/apt/archives/lock
+sudo dpkg --configure -a
 ```
 
-Restart Wings after Docker restarts.
+### IDX keeps shutting down
+- Make sure **auto-refresh extension** is active on the IDX tab
+- Set interval to **20 minutes** (not less — avoid ban)
+- Keep the **keepalive loop** running in IDX terminal
+- Use **RDP session** to keep the browser open
 
 ---
 
-## ✅ Common Issues & Solutions
+## 📁 Scripts Reference
 
-### Issue 1: IPv6 Crash in Containers
+| Script | Command | Purpose |
+|--------|---------|---------|
+| `main.sh` | `bash main.sh` | NexusBot all-in-one menu |
+| `vps.sh` | auto | Install Ubuntu VM on IDX |
+| `nexus-setup.sh` | auto | Setup SSH, RDP, Tailscale, sshx |
+| `panel.sh` | auto | Install Pelican Panel |
+| `wings.sh` | auto | Install Pelican Wings |
+| `plugin-client.sh` | auto | User registration + resource limits |
+| `restart.sh` | auto | Restart all services |
+| `uninstall.sh` | auto | Remove Pelican components |
 
-**Symptoms:**
-- Wings immediately crashes
-- Log shows `ip6_tables` or `modprobe` errors
-- Running in Codespaces/Docker
-
-**Root Cause:** Container can't load kernel modules
-
-**Fix:**
-```yaml
-# /etc/pelican/config.yml
-docker:
-  network:
-    IPv6: false  # Change from true
-    # Remove v6 section entirely
-```
-
-### Issue 2: Port Confusion
-
-**Problem:** Many ports involved - which is which?
-
-**Answer:**
-```
-Panel Internal:   8443  (Nginx)
-Wings Internal:   8080  (Wings API)
-External (Both):  443   (Cloudflare Tunnel)
-Users Connect:    443   (Always HTTPS)
-```
-
-**In Panel node settings:**
-- Port: `443` (what users/Panel connect to)
-- Behind Proxy: `YES`
-
-### Issue 3: systemd Not Available
-
-**Symptoms:**
-- `systemctl` commands fail
-- Running in container/Codespaces
-
-**Solution:** Use manual commands:
-
+### Run any script directly:
 ```bash
-# Start Wings
-sudo nohup /usr/local/bin/wings > /tmp/wings.log 2>&1 &
-
-# Start Cloudflared
-sudo cloudflared tunnel run TOKEN > /var/log/cloudflared.log 2>&1 &
-
-# Check running
-ps aux | grep wings
-ps aux | grep cloudflared
-
-# View logs
-tail -f /tmp/wings.log
-tail -f /var/log/cloudflared.log
+# Replace SCRIPT_NAME with the script you want
+curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/SCRIPT_NAME.sh | bash
 ```
-
-### Issue 4: Can't Access Panel After Install
-
-**Check 1:** Is Nginx running on 8443?
-```bash
-sudo netstat -tlnp | grep 8443
-# Should show nginx
-```
-
-**Check 2:** Is Cloudflare Tunnel configured?
-```bash
-# Test direct access (should fail - no DNS)
-curl -k https://localhost:8443
-
-# Test through Cloudflare (should work)
-curl https://panel.example.com
-```
-
-**Check 3:** Cloudflare Tunnel route settings:
-- Service URL: `localhost:8443` (NOT 443!)
-- No TLS Verify: ON
 
 ---
 
-## 🗑️ Uninstallation
+## 🔐 Security Notes
 
-### Complete Removal
-
-To completely remove Pelican and start fresh:
-
-```bash
-# Download uninstall script
-wget https://raw.githubusercontent.com/Adexx-11234/newrepo/main/uninstall.sh -O uninstall.sh
-chmod +x uninstall.sh
-
-# Run uninstall
-sudo ./uninstall.sh
-```
-
-The script will:
-- Stop all services
-- Remove Wings and Panel
-- Remove Docker containers and volumes
-- Remove Cloudflare Tunnel
-- Ask before removing database
-- Ask before removing Docker, PHP, Redis
-
-**Warning:** This cannot be undone!
-
-### Manual Uninstall Commands
-
-If you prefer manual removal:
+- ⚠️ Never share your `.pelican.env` file publicly
+- ⚠️ Never commit secrets to GitHub
+- ✅ Always add `.pelican.env` to `.gitignore`
+- ✅ Use strong passwords for root and database
+- ✅ Tailscale ensures SSH/RDP is not exposed publicly
+- ✅ Cloudflare Tunnel avoids opening ports on the server
 
 ```bash
-# Stop services
-sudo systemctl stop wings pelican-queue cloudflared nginx
-sudo pkill wings cloudflared
-
-# Remove Wings
-sudo rm -rf /etc/pelican /var/lib/pelican /var/log/pelican
-sudo rm /usr/local/bin/wings
-
-# Remove Panel
-sudo rm -rf /var/www/pelican
-
-# Remove Docker containers
-docker stop $(docker ps -aq)
-docker rm $(docker ps -aq)
-docker volume rm $(docker volume ls -q)
-
-# Remove Cloudflared
-sudo cloudflared service uninstall
-sudo apt remove -y cloudflared
-
-# Remove configs
-sudo rm /etc/nginx/sites-enabled/pelican.conf
-sudo rm /etc/systemd/system/wings.service
-sudo rm /etc/systemd/system/pelican-queue.service
-sudo systemctl daemon-reload
+# Add to gitignore
+echo ".pelican.env" >> .gitignore
+echo ".backups/" >> .gitignore
 ```
 
 ---
 
 ## 📝 Quick Reference
 
-### Important Ports
+### Important IPs & Ports
 
-| Service | Internal Port | External Port | Protocol |
-|---------|---------------|---------------|----------|
-| Panel | 8443 | 443 | HTTPS |
-| Wings | 8080 | 443 | HTTPS |
-| SFTP | 2022 | 2022 | SSH |
+```bash
+# Get Tailscale IP
+tailscale ip -4
 
-### Key Configuration Files
+# Get public IP
+curl ifconfig.me
 
-```
-Panel:
-  /var/www/pelican/.env
-  /etc/nginx/sites-available/pelican.conf
-  /etc/php/8.4/fpm/pool.d/www.conf
-
-Wings:
-  /etc/pelican/config.yml
-  /etc/docker/daemon.json
-
-Services:
-  /etc/systemd/system/wings.service
-  /etc/systemd/system/pelican-queue.service
+# Check all listening ports
+sudo ss -tlnp
 ```
 
 ### Useful Commands
@@ -875,131 +685,31 @@ php artisan cache:clear
 tail -f storage/logs/laravel.log
 
 # Wings
-sudo systemctl status wings
-sudo journalctl -u wings -f
+tail -f /tmp/wings.log
 curl -k https://localhost:8080/api/system
-tail -f /var/log/pelican/wings.log
 
-# Cloudflared
-sudo systemctl status cloudflared
-ps aux | grep cloudflared
-tail -f /var/log/cloudflared.log
+# sshx link
+journalctl -u sshx -f
 
-# Docker
-docker ps
-docker logs CONTAINER_ID
-docker network ls
+# Tailscale
+tailscale status
+tailscale ip -4
 ```
 
-### Testing Checklist
+---
 
-- [ ] Panel accessible at `https://panel.example.com`
-- [ ] Can login with admin account
-- [ ] Node shows green heart in Admin panel
-- [ ] Wings responds: `curl -k https://localhost:8080/api/system`
-- [ ] Cloudflare route works: `curl https://node-1.example.com/api/system`
-- [ ] Can create a test server
-- [ ] Docker containers start: `docker ps`
-- [ ] No errors in logs
+## 🎉 Done!
+
+If everything is set up correctly:
+
+- ✅ Ubuntu VM running inside Google IDX
+- ✅ Remote Desktop accessible via Tailscale
+- ✅ IDX kept alive 24/7 via auto-refresh
+- ✅ Pelican Panel accessible at `https://panel.yourdomain.com`
+- ✅ Wings node shows green heart in Panel
+- ✅ Users can self-register and create servers
 
 ---
 
-## 🎓 Understanding the Setup
-
-### Why Port 8443 for Panel?
-
-- Port 443 is often restricted in containers
-- Port 80/443 may be used by other services
-- 8443 avoids conflicts
-- Cloudflare Tunnel handles external 443 → internal 8443 mapping
-
-### Why Port 8080 for Wings?
-
-- Standard port for Wings daemon
-- Above 1024 (no root required)
-- Commonly used in containerized apps
-- Cloudflare Tunnel maps 443 → 8080
-
-### Why Behind Proxy: YES?
-
-When enabled:
-- Panel trusts Cloudflare's SSL termination
-- Panel uses Cloudflare's forwarded IP headers
-- Prevents SSL verification errors
-- Required for Cloudflare Tunnel setup
-
-### Why IPv6: false in Containers?
-
-Containers can't:
-- Load kernel modules (ip6_tables)
-- Modify iptables rules
-- Configure IPv6 networking
-
-Solution: Disable IPv6 in Wings config
-
----
-
-## 🚨 Production Checklist
-
-Before going live:
-
-- [ ] Use strong database passwords
-- [ ] Enable database backups
-- [ ] Configure email (SMTP) properly
-- [ ] Test server creation and deletion
-- [ ] Set up monitoring (uptime checks)
-- [ ] Document your admin credentials safely
-- [ ] Enable 2FA for admin accounts
-- [ ] Review Panel logs regularly
-- [ ] Test disaster recovery (backups)
-- [ ] Configure automatic updates
-
----
-
-## 📚 Additional Resources
-
-- **Pelican Panel Docs:** https://pelican.dev/docs
-- **Cloudflare Tunnel Docs:** https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/
-- **Wings GitHub:** https://github.com/pelican-dev/wings
-- **Panel GitHub:** https://github.com/pelican-dev/panel
-- **Community Discord:** Check Pelican Panel website
-
----
-
-## 🎉 Success!
-
-If everything is working:
-- ✅ Panel accessible and admin user created
-- ✅ Node shows green heart
-- ✅ Wings responding to API calls
-- ✅ Can create test servers
-
-**You're ready to:**
-1. Create game servers
-2. Configure eggs (server templates)
-3. Manage allocations
-4. Set up backups
-5. Add more nodes
-
-Congratulations! 🎮
-
----
-
-**Last Updated:** January 2026  
-**Tested On:** Debian 11/12, Ubuntu 20.04/22.04/24.04, GitHub Codespaces  
-**Pelican Version:** 1.0.0-beta21  
-**Compatibility:** VPS, Bare Metal, Containers, Codespaces
-
----
-
-## 📧 Need Help?
-
-If you encounter issues not covered in this guide:
-
-1. Check logs first (see Quick Reference section)
-2. Review the Troubleshooting section
-3. Verify all configuration settings
-4. Test each component individually
-5. Join Pelican community Discord
-
-Remember: Most issues are configuration problems, not bugs!
+**Made with ❤️ by NexusTechPro**  
+[github.com/Adexx-11234/newrepo](https://github.com/Adexx-11234/newrepo)
