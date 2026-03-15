@@ -326,13 +326,23 @@ build_qemu_cmd() {
 }
 
 # --- CHECK SSH PORT OPEN ---
+# Does a real SSH banner check — a frozen VM can still accept TCP but never sends the SSH banner.
+# TCP-only checks (echo >/dev/tcp, nc -z) return false positives on frozen VMs.
 check_ssh_port_open() {
     local port=$1
-    if (echo >/dev/tcp/localhost/"$port") 2>/dev/null; then
-        return 0
-    elif command -v nc &>/dev/null && nc -z -w2 localhost "$port" 2>/dev/null; then
-        return 0
+    local banner
+    # Try to read the SSH banner within 5 seconds — frozen VMs never send it
+    if command -v timeout &>/dev/null; then
+        banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/localhost/$port && cat <&3" 2>/dev/null | head -1)
+    else
+        banner=$(bash -c "exec 3<>/dev/tcp/localhost/$port && cat <&3" 2>/dev/null &
+                 local pid=$!
+                 sleep 5
+                 kill $pid 2>/dev/null
+                 wait $pid 2>/dev/null) | head -1
     fi
+    # SSH banner always starts with "SSH-"
+    [[ "$banner" == SSH-* ]] && return 0
     return 1
 }
 
@@ -583,7 +593,30 @@ start_freeze_watchdog() {
     print_status "INFO"    "Watchdog log: $VM_DIR/$vm_name.watchdog.log"
 }
 
-# --- SSH INTO VM ---
+# --- ATTACH WATCHDOG TO ALREADY-RUNNING VM ---
+# Use this when a VM was started before the watchdog existed, or watchdog died.
+attach_watchdog() {
+    local vm_name=$1
+    if ! load_vm_config "$vm_name"; then return 1; fi
+
+    if ! is_vm_running "$vm_name"; then
+        print_status "ERROR" "VM '$vm_name' is not running"
+        return 1
+    fi
+
+    local watchdog_log="$VM_DIR/$vm_name.watchdog.log"
+
+    # Check if watchdog is already running for this VM
+    if pgrep -f "watchdog.*$vm_name" &>/dev/null; then
+        print_status "WARN" "A watchdog process may already be running for $vm_name"
+    fi
+
+    print_status "INFO" "Attaching freeze watchdog to running VM: $vm_name"
+    echo "[$(date '+%H:%M:%S')] Watchdog manually attached to already-running VM" >> "$watchdog_log"
+    start_freeze_watchdog "$vm_name"
+    print_status "SUCCESS" "Watchdog attached. It will now detect and recover any freeze."
+    print_status "INFO"    "Monitor: tail -f $watchdog_log"
+}
 ssh_into_vm() {
     local vm_name=$1
     if ! load_vm_config "$vm_name"; then return 1; fi
@@ -984,6 +1017,7 @@ main_menu() {
             echo "  8) Show VM performance"
             echo "  9) View serial log (freeze diagnosis)"
             echo " 10) View watchdog log (freeze recovery history)"
+            echo " 11) Attach watchdog to running VM"
         fi
         echo "  0) Exit"
         echo
@@ -1036,6 +1070,11 @@ main_menu() {
                 [ $vm_count -eq 0 ] && continue
                 read -p "$(print_status "INPUT" "VM number for watchdog log: ")" n
                 [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le $vm_count ] && view_watchdog_log "${vms[$((n-1))]}" || print_status "ERROR" "Invalid selection"
+                ;;
+            11)
+                [ $vm_count -eq 0 ] && continue
+                read -p "$(print_status "INPUT" "VM number to attach watchdog: ")" n
+                [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le $vm_count ] && attach_watchdog "${vms[$((n-1))]}" || print_status "ERROR" "Invalid selection"
                 ;;
             0) print_status "INFO" "Goodbye!"; exit 0 ;;
             *) print_status "ERROR" "Invalid option" ;;
