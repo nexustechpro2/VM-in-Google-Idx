@@ -276,7 +276,7 @@ freeze_recovery() {
 }
 
 # --- POST RECOVERY SETUP ---
-# Runs after freeze recovery — starts tailscale and sshx inside VM
+# Runs after freeze recovery — starts tailscale, sshx and restart script
 post_recovery_setup() {
     local vm_name=$1
     local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
@@ -300,6 +300,11 @@ disown
 sleep 4
 SSHX_LINK=$(grep -o 'https://sshx.io/s/[^ ]*' /tmp/sshx.log 2>/dev/null | head -1)
 echo "sshx link: $SSHX_LINK"
+
+# Wait for sshx then run restart script
+sleep 5
+BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
+sudo bash <(curl -fsSL "${BASE_URL}/restart.sh") 2>/dev/null || true
 REMOTE
 
     echo "[$(date '+%H:%M:%S')] Post-recovery setup done" >> "$watchdog_log"
@@ -504,6 +509,11 @@ disown
 sleep 4
 SSHX_LINK=$(grep -o 'https://sshx.io/s/[^ ]*' /tmp/sshx.log 2>/dev/null | head -1)
 echo "sshx: $SSHX_LINK"
+
+# Wait for sshx then run restart script
+sleep 5
+BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
+sudo bash <(curl -fsSL "${BASE_URL}/restart.sh") 2>/dev/null || true
 REMOTE
 
     print_status "SUCCESS" "Post-boot setup done"
