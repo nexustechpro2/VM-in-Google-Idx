@@ -370,7 +370,7 @@ sudo tailscale up || true
 # Fix sshx service to run as nexus user
 sudo systemctl stop sshx || true
 sudo systemctl disable sshx || true
-sudo tee /etc/systemd/system/sshx.service > /dev/null <<'SF'
+sudo tee /etc/systemd/system/sshx.service > /dev/null <<'SSHXSF'
 [Unit]
 Description=sshx terminal sharing
 After=network.target
@@ -386,7 +386,7 @@ RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
-SF
+SSHXSF
 sudo systemctl daemon-reload
 sudo systemctl enable sshx
 sudo systemctl restart sshx
