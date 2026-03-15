@@ -815,18 +815,20 @@ start_periodic_snapshot() {
         local snap_img="$_SNAPSHOT_DIR/$vm_name.img"
         local snap_compressed="$_SNAPSHOT_DIR/$vm_name.img.compressed"
 
-        # Wait for initial compression before starting loop
-        echo "[$(date '+%H:%M:%S')] Periodic snapshot: waiting for initial compression..." >> "$wlog"
-        while true; do
-            if [[ -f "$snap_compressed" ]] && [[ ! -f "${snap_compressed}.compressing" ]]; then
-                break
-            fi
-            sleep 60
-            if ! is_running_local "$vm_name"; then
-                echo "[$(date '+%H:%M:%S')] Periodic snapshot: VM stopped — exiting" >> "$wlog"
-                exit 0
-            fi
-        done
+# Wait for initial compression before starting loop
+echo "[$(date '+%H:%M:%S')] Periodic snapshot: waiting for initial compression..." >> "$wlog"
+while true; do
+    if [[ -f "$snap_compressed" ]] && \
+       [[ ! -f "${snap_compressed}.compressing" ]] && \
+       [[ ! -f "$snap_img" ]]; then
+        break
+    fi
+    sleep 60
+    if ! is_running_local "$vm_name"; then
+        echo "[$(date '+%H:%M:%S')] Periodic snapshot: VM stopped — exiting" >> "$wlog"
+        exit 0
+    fi
+done
 
         echo "[$(date '+%H:%M:%S')] Periodic snapshot loop started" >> "$wlog"
 
