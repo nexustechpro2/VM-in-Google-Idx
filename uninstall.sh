@@ -171,16 +171,37 @@ if [[ "$REMOVE_DB" =~ ^[Yy] ]]; then
         echo -e "${RED}   ⚠️  FINAL CONFIRMATION${NC}"
         echo -e "   Database: ${DB_DRIVER} @ ${DB_HOST}/${DB_NAME}"
         read -p "   Type 'DELETE ALL DATA' to confirm: " DB_CONFIRM
-        
+
         if [ "$DB_CONFIRM" = "DELETE ALL DATA" ]; then
             if [ "$DB_DRIVER" = "pgsql" ]; then
-                PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" 2>/dev/null && {
-                    echo -e "${GREEN}   ✓ PostgreSQL data removed${NC}"
+                # Install postgresql-client if missing
+                if ! command -v psql &>/dev/null; then
+                    echo -e "${YELLOW}   psql not found — installing postgresql-client...${NC}"
+                    apt install -y postgresql-client 2>/dev/null && \
+                        echo -e "${GREEN}   ✓ postgresql-client installed${NC}" || \
+                        { echo -e "${RED}   ✗ Failed to install postgresql-client${NC}"; exit 1; }
+                fi
+
+                echo -e "${YELLOW}   Dropping all tables...${NC}"
+                PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+                    -c "DO \$\$ DECLARE r RECORD; BEGIN FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE'; END LOOP; END \$\$;" 2>/dev/null && {
+                    echo -e "${GREEN}   ✓ PostgreSQL tables dropped${NC}"
                 } || {
-                    echo -e "${RED}   ✗ Failed to drop database${NC}"
+                    echo -e "${RED}   ✗ Failed to drop tables — running verbose for details...${NC}"
+                    PGPASSWORD="$DB_PASS" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+                        -c "DO \$\$ DECLARE r RECORD; BEGIN FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE'; END LOOP; END \$\$;"
                 }
             else
-                mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -e "DROP DATABASE IF EXISTS ${DB_NAME}; CREATE DATABASE ${DB_NAME};" 2>/dev/null && {
+                # Install mysql-client if missing
+                if ! command -v mysql &>/dev/null; then
+                    echo -e "${YELLOW}   mysql not found — installing mysql-client...${NC}"
+                    apt install -y mysql-client 2>/dev/null || apt install -y mariadb-client 2>/dev/null && \
+                        echo -e "${GREEN}   ✓ mysql-client installed${NC}" || \
+                        { echo -e "${RED}   ✗ Failed to install mysql-client${NC}"; exit 1; }
+                fi
+
+                mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" \
+                    -e "DROP DATABASE IF EXISTS ${DB_NAME}; CREATE DATABASE ${DB_NAME};" 2>/dev/null && {
                     echo -e "${GREEN}   ✓ MySQL data removed${NC}"
                 } || {
                     echo -e "${RED}   ✗ Failed to drop database${NC}"
