@@ -24,8 +24,17 @@ if [[ $EUID -ne 0 ]]; then
    exit $?
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/.pelican.env"
+ENV_FILE=""
+for location in \
+    "/root/.pelican.env" \
+    "$HOME/.pelican.env" \
+    "$(pwd)/.pelican.env"; do
+    if [ -f "$location" ]; then
+        ENV_FILE="$location"
+        break
+    fi
+done
+[ -z "$ENV_FILE" ] && ENV_FILE="/root/.pelican.env"
 
 # Load config if exists
 if [ -f "$ENV_FILE" ]; then

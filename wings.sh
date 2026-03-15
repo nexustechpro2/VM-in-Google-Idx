@@ -19,8 +19,17 @@ NC='\033[0m'
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
 hash -r 2>/dev/null || true
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/.pelican.env"
+ENV_FILE=""
+for location in \
+    "/root/.pelican.env" \
+    "$HOME/.pelican.env" \
+    "$(pwd)/.pelican.env"; do
+    if [ -f "$location" ]; then
+        ENV_FILE="$location"
+        break
+    fi
+done
+[ -z "$ENV_FILE" ] && ENV_FILE="/root/.pelican.env"
 
 echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║   Pelican Wings Installer v8.0 FINAL  ║${NC}"
