@@ -525,6 +525,16 @@ kill_vm() {
     pkill -f "qemu-system-x86_64.*$BACKUP_DIR/$vm_name" 2>/dev/null || true
 }
 
+# --- CHECK SSH PORT OPEN ---
+check_ssh_port_open() {
+    local port=$1
+    local banner
+    banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/localhost/$port && cat <&3" 2>/dev/null | head -1)
+    [[ "$banner" == SSH-* ]] && return 0
+    return 1
+}
+
+
 # --- IS VM RUNNING ---
 is_vm_running() {
     local vm_name=$1
@@ -610,32 +620,156 @@ wait_for_ssh() {
 }
 
 # --- BACKGROUND WATCHDOG ---
-# Checks SSH every 20 secs — triggers freeze_recovery on freeze
 start_freeze_watchdog() {
     local vm_name=$1
     local serial_log="$BACKUP_DIR/$vm_name.serial.log"
     local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
+    local _BACKUP_DIR="$BACKUP_DIR"
+    local _SNAPSHOT_DIR="$SNAPSHOT_DIR"
+    local _SSH_PORT="$SSH_PORT"
+    local _PASSWORD="$PASSWORD"
+    local _USERNAME="$USERNAME"
 
     (
+        # Inline all needed functions so subshell doesn't need exports
+        check_ssh_port_open() {
+            local port=$1
+            local banner
+            banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/localhost/$port && cat <&3" 2>/dev/null | head -1)
+            [[ "$banner" == SSH-* ]] && return 0
+            return 1
+        }
+
+        kill_vm_local() {
+            local vm=$1
+            local pid_file="$_BACKUP_DIR/$vm.pid"
+            if [[ -f "$pid_file" ]]; then
+                local pid
+                pid=$(cat "$pid_file" 2>/dev/null) || true
+                [[ -n "$pid" ]] && { kill "$pid" 2>/dev/null || true; sleep 2; kill -9 "$pid" 2>/dev/null || true; }
+                rm -f "$pid_file"
+            fi
+            pkill -f "qemu-system-x86_64.*$_BACKUP_DIR/$vm" 2>/dev/null || true
+        }
+
+        freeze_recovery_local() {
+            local vm=$1
+            local live_img="$_BACKUP_DIR/$vm.img"
+            local snapshot_img="$_SNAPSHOT_DIR/$vm.img"
+            local serial_log="$_BACKUP_DIR/$vm.serial.log"
+            local wlog="$_BACKUP_DIR/$vm.watchdog.log"
+
+            echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$wlog"
+
+            echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$wlog"
+            kill_vm_local "$vm"
+            sleep 2
+
+            if [[ ! -f "$snapshot_img" ]]; then
+                echo "[$(date '+%H:%M:%S')] ERROR: No snapshot in tmpfs — cannot recover" >> "$wlog"
+                return 1
+            fi
+
+            echo "[$(date '+%H:%M:%S')] Step 2: Restoring snapshot to /home..." >> "$wlog"
+            local tmp_live="${live_img}.restoring"
+            if cp "$snapshot_img" "$tmp_live"; then
+                if qemu-img check "$tmp_live" >> "$wlog" 2>&1; then
+                    mv "$tmp_live" "$live_img"
+                    echo "[$(date '+%H:%M:%S')] Restore verified OK" >> "$wlog"
+                else
+                    rm -f "$tmp_live"
+                    echo "[$(date '+%H:%M:%S')] ERROR: Verification failed" >> "$wlog"
+                    return 1
+                fi
+            else
+                echo "[$(date '+%H:%M:%S')] ERROR: Copy failed" >> "$wlog"
+                return 1
+            fi
+
+            echo "[$(date '+%H:%M:%S')] Step 3: Restarting VM..." >> "$wlog"
+            rm -f "$serial_log"
+
+            local seed_file="$_BACKUP_DIR/$vm-seed.iso"
+            local kvm_flag="-enable-kvm"
+            [[ ! -w /dev/kvm ]] && kvm_flag="-accel tcg,thread=multi"
+
+            local mem cpus ssh_port
+            mem=$(grep ^MEMORY "$_BACKUP_DIR/$vm.conf" 2>/dev/null | cut -d'"' -f2)
+            cpus=$(grep ^CPUS "$_BACKUP_DIR/$vm.conf" 2>/dev/null | cut -d'"' -f2)
+            ssh_port=$(grep ^SSH_PORT "$_BACKUP_DIR/$vm.conf" 2>/dev/null | cut -d'"' -f2)
+            local port_fwds
+            port_fwds=$(grep ^PORT_FORWARDS "$_BACKUP_DIR/$vm.conf" 2>/dev/null | cut -d'"' -f2)
+
+            local qcmd="qemu-system-x86_64 $kvm_flag -machine q35,mem-merge=off -m $mem -smp $cpus -cpu host,+x2apic"
+            qcmd+=" -drive file=$live_img,format=qcow2,if=virtio,cache=writeback,discard=unmap,aio=threads"
+            qcmd+=" -drive file=$seed_file,format=raw,if=virtio,cache=writeback"
+            qcmd+=" -boot order=c -device virtio-net-pci,netdev=n0"
+            qcmd+=" -netdev user,id=n0,hostfwd=tcp::${ssh_port}-:22"
+            qcmd+=" -object rng-random,filename=/dev/urandom,id=rng0"
+            qcmd+=" -device virtio-rng-pci,rng=rng0 -device virtio-balloon-pci"
+            qcmd+=" -serial file:$serial_log -display none -daemonize"
+            qcmd+=" -pidfile $_BACKUP_DIR/$vm.pid"
+
+            if eval "$qcmd" >> "$wlog" 2>&1; then
+                echo "[$(date '+%H:%M:%S')] VM restarted OK" >> "$wlog"
+            else
+                echo "[$(date '+%H:%M:%S')] ERROR: Restart failed" >> "$wlog"
+                return 1
+            fi
+
+            # Wait for SSH then run post-recovery
+            local elapsed=0
+            while [[ $elapsed -lt 120 ]]; do
+                if check_ssh_port_open "$ssh_port"; then
+                    echo "[$(date '+%H:%M:%S')] SSH ready — running post-recovery setup..." >> "$wlog"
+                    sleep 10
+                    sshpass -p "$_PASSWORD" ssh \
+                        -o StrictHostKeyChecking=no \
+                        -o UserKnownHostsFile=/dev/null \
+                        -o ConnectTimeout=15 \
+                        -o LogLevel=ERROR \
+                        -p "$ssh_port" "${_USERNAME}@localhost" bash <<REMOTE >> "$wlog" 2>&1
+sudo tailscale up
+pkill -9 sshx || true
+sleep 1
+setsid /usr/local/bin/sshx > /tmp/sshx.log 2>&1 &
+disown
+sleep 4
+SSHX_LINK=\$(grep -o 'https://sshx.io/s/[^ ]*' /tmp/sshx.log 2>/dev/null | head -1)
+echo "sshx: \$SSHX_LINK"
+sleep 5
+BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
+sudo bash <(curl -fsSL "\${BASE_URL}/restart.sh")
+REMOTE
+                    echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY COMPLETE =====" >> "$wlog"
+                    return 0
+                fi
+                sleep 5
+                elapsed=$((elapsed + 5))
+            done
+
+            echo "[$(date '+%H:%M:%S')] WARNING: SSH did not respond after recovery" >> "$wlog"
+            return 1
+        }
+
         local recovery_count=0
         local max_recoveries=3
 
-        sleep 120  # grace period during boot
+        sleep 120
 
         while true; do
-            sleep 20  # check every 20 seconds
+            sleep 20
 
-            [[ ! -f "$BACKUP_DIR/$vm_name.pid" ]] && exit 0
+            [[ ! -f "$_BACKUP_DIR/$vm_name.pid" ]] && exit 0
 
             local pid
-            pid=$(cat "$BACKUP_DIR/$vm_name.pid" 2>/dev/null) || exit 0
+            pid=$(cat "$_BACKUP_DIR/$vm_name.pid" 2>/dev/null) || exit 0
             if ! kill -0 "$pid" 2>/dev/null; then
                 echo "[$(date '+%H:%M:%S')] QEMU process died" >> "$watchdog_log"
                 exit 0
             fi
 
-            if ! check_ssh_port_open "$SSH_PORT"; then
-                # Confirm with serial staleness
+            if ! check_ssh_port_open "$_SSH_PORT"; then
                 local stale=0
                 if [[ -f "$serial_log" ]]; then
                     local lm now
@@ -654,10 +788,10 @@ start_freeze_watchdog() {
                     fi
 
                     ((recovery_count++))
-                    if freeze_recovery "$vm_name"; then
+                    if freeze_recovery_local "$vm_name"; then
                         echo "[$(date '+%H:%M:%S')] Recovery complete" >> "$watchdog_log"
                         recovery_count=0
-                        sleep 120  # grace period after recovery
+                        sleep 120
                     else
                         echo "[$(date '+%H:%M:%S')] Recovery failed" >> "$watchdog_log"
                         exit 1
@@ -677,23 +811,60 @@ start_freeze_watchdog() {
 
 # --- PERIODIC SNAPSHOT BACKUP ---
 # Every 20 mins copies /home image → tmpfs snapshot
+# --- PERIODIC SNAPSHOT BACKUP ---
 start_periodic_snapshot() {
     local vm_name=$1
-    local live_img="$BACKUP_DIR/$vm_name.img"
     local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
+    local _BACKUP_DIR="$BACKUP_DIR"
+    local _SNAPSHOT_DIR="$SNAPSHOT_DIR"
 
     (
-        sleep 1200  # first snapshot after 20 mins
+        is_vm_running_local() {
+            local vm=$1
+            local pid_file="$_BACKUP_DIR/$vm.pid"
+            [[ -f "$pid_file" ]] || return 1
+            local pid
+            pid=$(cat "$pid_file" 2>/dev/null) || return 1
+            kill -0 "$pid" 2>/dev/null && return 0
+            return 1
+        }
+
+        update_snapshot_local() {
+            local vm=$1
+            local live_img="$_BACKUP_DIR/$vm.img"
+            local snapshot_img="$_SNAPSHOT_DIR/$vm.img"
+            local wlog="$_BACKUP_DIR/$vm.watchdog.log"
+
+            local free_kb
+            free_kb=$(df -k "/" 2>/dev/null | awk 'NR==2{print $4}')
+            local free_gb=$(( free_kb / 1024 / 1024 ))
+            if [[ $free_gb -lt 8 ]]; then
+                echo "[$(date '+%H:%M:%S')] Snapshot update skipped — not enough tmpfs space" >> "$wlog"
+                return 1
+            fi
+
+            echo "[$(date '+%H:%M:%S')] Updating snapshot..." >> "$wlog"
+            local tmp_snapshot="${snapshot_img}.new"
+            if cp "$live_img" "$tmp_snapshot"; then
+                mv "$tmp_snapshot" "$snapshot_img"
+                echo "[$(date '+%H:%M:%S')] Snapshot updated OK ($(du -sh "$snapshot_img" | awk '{print $1}'))" >> "$wlog"
+                return 0
+            else
+                rm -f "$tmp_snapshot"
+                echo "[$(date '+%H:%M:%S')] Snapshot update failed" >> "$wlog"
+                return 1
+            fi
+        }
+
+        sleep 1200
 
         while true; do
-            # Only run if VM is still running
-            if ! is_vm_running "$vm_name"; then
+            if ! is_vm_running_local "$vm_name"; then
                 echo "[$(date '+%H:%M:%S')] Periodic snapshot: VM not running — stopping" >> "$watchdog_log"
                 exit 0
             fi
-
-            update_snapshot "$vm_name"
-            sleep 1200  # every 20 mins
+            update_snapshot_local "$vm_name"
+            sleep 1200
         done
     ) >> "$watchdog_log" 2>&1 &
 
@@ -1225,20 +1396,5 @@ declare -A OS_OPTIONS=(
     ["AlmaLinux 9"]="almalinux|9|https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2|almalinux9|alma|alma"
     ["Rocky Linux 9"]="rockylinux|9|https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2|rocky9|rocky|rocky"
 )
-
-# --- EXPORT FUNCTIONS FOR SUBSHELLS ---
-export BACKUP_DIR
-export SNAPSHOT_DIR
-export -f check_ssh_port_open
-export -f kill_vm
-export -f is_vm_running
-export -f build_qemu_cmd
-export -f freeze_recovery
-export -f post_recovery_setup
-export -f update_snapshot
-export -f ensure_snapshot
-export -f check_space
-export -f print_status
-export -f load_vm_config
 
 main_menu
