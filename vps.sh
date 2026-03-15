@@ -303,7 +303,7 @@ echo "sshx link: \$SSHX_LINK"
 # Wait for sshx then run restart script
 sleep 5
 BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
-sudo bash <(curl -fsSL "\${BASE_URL}/restart.sh")
+curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh && sudo bash /tmp/nexus-restart.sh && rm -f /tmp/nexus-restart.sh
 REMOTE
 
     echo "[$(date '+%H:%M:%S')] Post-recovery setup done" >> "$watchdog_log"
@@ -462,19 +462,19 @@ apply_post_boot_fixes() {
 
     sshpass -p "$pass" ssh $ssh_opts -p "$port" "${user}@localhost" bash <<'REMOTE'
 # Journald fix
-mkdir -p /etc/systemd/journald.conf.d
-cat > /etc/systemd/journald.conf.d/no-freeze.conf <<'JF'
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/no-freeze.conf > /dev/null <<'JF'
 [Journal]
 Storage=volatile
 SyncIntervalSec=0
 RateLimitBurst=0
 JF
-systemctl restart systemd-journald
+sudo systemctl restart systemd-journald || true
 
 # Docker fix
 if command -v docker &>/dev/null; then
-    mkdir -p /etc/docker
-    cat > /etc/docker/daemon.json <<'DF'
+    sudo mkdir -p /etc/docker
+    sudo tee /etc/docker/daemon.json > /dev/null <<'DF'
 {
   "dns": ["8.8.8.8","1.1.1.1"],
   "dns-opts": ["ndots:0"],
@@ -484,14 +484,14 @@ if command -v docker &>/dev/null; then
   "userland-proxy": false
 }
 DF
-    systemctl restart docker
+    sudo systemctl restart docker || true
 fi
 
 # Start tailscale
-sudo tailscale up
+sudo tailscale up || true
 
 # Start sshx
-pkill -9 sshx || true
+sudo pkill -9 sshx || true
 sleep 1
 setsid /usr/local/bin/sshx > /tmp/sshx.log 2>&1 &
 disown
@@ -499,10 +499,10 @@ sleep 4
 SSHX_LINK=$(grep -o 'https://sshx.io/s/[^ ]*' /tmp/sshx.log 2>/dev/null | head -1)
 echo "sshx: $SSHX_LINK"
 
-# Wait for sshx then run restart script
+# Run restart script via temp file (process substitution doesn't work over SSH)
 sleep 5
 BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
-sudo bash <(curl -fsSL "${BASE_URL}/restart.sh")
+curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh && sudo bash /tmp/nexus-restart.sh && rm -f /tmp/nexus-restart.sh
 REMOTE
 
     print_status "SUCCESS" "Post-boot setup done"
