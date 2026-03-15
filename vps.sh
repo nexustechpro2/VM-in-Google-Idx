@@ -276,7 +276,6 @@ freeze_recovery() {
 }
 
 # --- POST RECOVERY SETUP ---
-# Runs after freeze recovery — starts tailscale, sshx and restart script
 post_recovery_setup() {
     local vm_name=$1
     local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
@@ -288,23 +287,23 @@ post_recovery_setup() {
 
     local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -o LogLevel=ERROR"
 
-    sshpass -p "$PASSWORD" ssh $ssh_opts -p "$SSH_PORT" "${USERNAME}@localhost" bash <<'REMOTE' >> "$watchdog_log" 2>&1 || true
+    sshpass -p "$PASSWORD" ssh $ssh_opts -p "$SSH_PORT" "${USERNAME}@localhost" bash <<REMOTE >> "$watchdog_log" 2>&1
 # Start tailscale
-sudo tailscale up 2>/dev/null || true
+sudo tailscale up
 
 # Kill any existing sshx and restart
-pkill -9 sshx 2>/dev/null || true
+pkill -9 sshx || true
 sleep 1
 setsid /usr/local/bin/sshx > /tmp/sshx.log 2>&1 &
 disown
 sleep 4
-SSHX_LINK=$(grep -o 'https://sshx.io/s/[^ ]*' /tmp/sshx.log 2>/dev/null | head -1)
-echo "sshx link: $SSHX_LINK"
+SSHX_LINK=\$(grep -o 'https://sshx.io/s/[^ ]*' /tmp/sshx.log 2>/dev/null | head -1)
+echo "sshx link: \$SSHX_LINK"
 
 # Wait for sshx then run restart script
 sleep 5
 BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
-sudo bash <(curl -fsSL "${BASE_URL}/restart.sh") 2>/dev/null || true
+sudo bash <(curl -fsSL "\${BASE_URL}/restart.sh")
 REMOTE
 
     echo "[$(date '+%H:%M:%S')] Post-recovery setup done" >> "$watchdog_log"
@@ -447,16 +446,6 @@ build_qemu_cmd() {
     echo "${cmd[@]}"
 }
 
-# --- CHECK SSH PORT OPEN ---
-# Real SSH banner check — frozen VMs accept TCP but never send SSH-
-check_ssh_port_open() {
-    local port=$1
-    local banner
-    banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/localhost/$port && cat <&3" 2>/dev/null | head -1)
-    [[ "$banner" == SSH-* ]] && return 0
-    return 1
-}
-
 # --- APPLY POST BOOT FIXES ---
 apply_post_boot_fixes() {
     local port=$1
@@ -471,7 +460,7 @@ apply_post_boot_fixes() {
     print_status "INFO" "Applying post-boot hardening + starting services..."
     local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
 
-    sshpass -p "$pass" ssh $ssh_opts -p "$port" "${user}@localhost" bash <<'REMOTE' 2>/dev/null || true
+    sshpass -p "$pass" ssh $ssh_opts -p "$port" "${user}@localhost" bash <<'REMOTE'
 # Journald fix
 mkdir -p /etc/systemd/journald.conf.d
 cat > /etc/systemd/journald.conf.d/no-freeze.conf <<'JF'
@@ -480,7 +469,7 @@ Storage=volatile
 SyncIntervalSec=0
 RateLimitBurst=0
 JF
-systemctl restart systemd-journald 2>/dev/null || true
+systemctl restart systemd-journald
 
 # Docker fix
 if command -v docker &>/dev/null; then
@@ -495,14 +484,14 @@ if command -v docker &>/dev/null; then
   "userland-proxy": false
 }
 DF
-    systemctl restart docker 2>/dev/null || true
+    systemctl restart docker
 fi
 
 # Start tailscale
-sudo tailscale up 2>/dev/null || true
+sudo tailscale up
 
 # Start sshx
-pkill -9 sshx 2>/dev/null || true
+pkill -9 sshx || true
 sleep 1
 setsid /usr/local/bin/sshx > /tmp/sshx.log 2>&1 &
 disown
@@ -513,7 +502,7 @@ echo "sshx: $SSHX_LINK"
 # Wait for sshx then run restart script
 sleep 5
 BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
-sudo bash <(curl -fsSL "${BASE_URL}/restart.sh") 2>/dev/null || true
+sudo bash <(curl -fsSL "${BASE_URL}/restart.sh")
 REMOTE
 
     print_status "SUCCESS" "Post-boot setup done"
