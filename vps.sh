@@ -370,7 +370,7 @@ sudo tailscale up || true
 # Start sshx
 sudo pkill -9 sshx || true
 sleep 1
-setsid /usr/local/bin/sshx > /tmp/sshx.log 2>&1 &
+nohup sshx > /tmp/sshx.log 2>&1 &
 disown
 sleep 4
 SSHX_LINK=$(grep -o 'https://sshx.io/s/[^ ]*' /tmp/sshx.log 2>/dev/null | head -1)
@@ -677,7 +677,7 @@ start_freeze_watchdog() {
 sudo tailscale up || true
 sudo pkill -9 sshx || true
 sleep 1
-setsid /usr/local/bin/sshx > /tmp/sshx.log 2>&1 &
+nohup sshx > /tmp/sshx.log 2>&1 &
 disown
 sleep 4
 SSHX_LINK=\$(grep -o 'https://sshx.io/s/[^ ]*' /tmp/sshx.log 2>/dev/null | head -1)
