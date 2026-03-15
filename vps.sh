@@ -315,6 +315,90 @@ build_qemu_cmd() {
     echo "${cmd[@]}"
 }
 
+# --- CONTINUOUS FREEZE WATCHDOG ---
+# Place this after the build_qemu_cmd() function
+
+start_freeze_watchdog() {
+    local vm_name=$1
+    local serial_log="$VM_DIR/$vm_name.serial.log"
+    local watchdog_log="$VM_DIR/$vm_name.watchdog.log"
+
+    (
+        local restart_count=0
+        local max_restarts=3
+
+        # Grace period — don't monitor during initial boot
+        sleep 90
+
+        while true; do
+            sleep 30
+
+            # Stop watching if VM was intentionally killed (no pid file)
+            [[ ! -f "$VM_DIR/$vm_name.pid" ]] && exit 0
+
+            # Check if QEMU process is still alive
+            local pid
+            pid=$(cat "$VM_DIR/$vm_name.pid" 2>/dev/null) || exit 0
+            kill -0 "$pid" 2>/dev/null || {
+                echo "[$(date '+%H:%M:%S')] QEMU process died" >> "$watchdog_log"
+                exit 0
+            }
+
+            # SSH port check — this is the primary freeze indicator
+            if ! check_ssh_port_open "$SSH_PORT"; then
+
+                # Confirm with serial log staleness (avoids false positives during reboot)
+                local stale_seconds=0
+                if [[ -f "$serial_log" ]]; then
+                    local last_mod now
+                    last_mod=$(stat -c %Y "$serial_log" 2>/dev/null || echo 0)
+                    now=$(date +%s)
+                    stale_seconds=$((now - last_mod))
+                fi
+
+                if [[ $stale_seconds -gt 40 ]]; then
+                    echo "[$(date '+%H:%M:%S')] FREEZE DETECTED — SSH down, serial stale ${stale_seconds}s" >> "$watchdog_log"
+                    echo "[$(date '+%H:%M:%S')] Last serial line: $(tail -1 "$serial_log" 2>/dev/null)" >> "$watchdog_log"
+
+                    [[ $restart_count -ge $max_restarts ]] && {
+                        echo "[$(date '+%H:%M:%S')] Max restarts reached. Giving up." >> "$watchdog_log"
+                        exit 1
+                    }
+
+                    # Kill frozen VM
+                    kill_vm "$vm_name" 2>/dev/null || true
+                    sleep 2
+
+                    # Backup the image to /tmp
+                    echo "[$(date '+%H:%M:%S')] Backing up image to /tmp..." >> "$watchdog_log"
+                    backup_vm_to_tmp "$vm_name" >> "$watchdog_log" 2>&1 || true
+
+                    # Restart VM
+                    rm -f "$serial_log"
+                    local qemu_cmd
+                    qemu_cmd=$(build_qemu_cmd "$vm_name")
+                    eval "$qemu_cmd" >> "$watchdog_log" 2>&1 && \
+                        echo "[$(date '+%H:%M:%S')] VM restarted (attempt $((restart_count+1))/$max_restarts)" >> "$watchdog_log" || \
+                        echo "[$(date '+%H:%M:%S')] Restart failed" >> "$watchdog_log"
+
+                    ((restart_count++))
+                    sleep 90  # wait for next boot before checking again
+
+                else
+                    echo "[$(date '+%H:%M:%S')] SSH down but serial active (${stale_seconds}s) — likely rebooting" >> "$watchdog_log"
+                fi
+
+            else
+                # SSH responsive — VM is healthy, reset counter
+                restart_count=0
+            fi
+        done
+    ) >> "$watchdog_log" 2>&1 &
+
+    disown
+    print_status "SUCCESS" "Freeze watchdog active (log: $VM_DIR/$vm_name.watchdog.log)"
+}
+
 # --- CHECK SSH PORT OPEN ---
 check_ssh_port_open() {
     local port=$1
@@ -652,6 +736,8 @@ start_vm() {
         print_status "ERROR" "Failed to start QEMU"
         return 1
     }
+
+    start_freeze_watchdog "$vm_name"   # <-- ADD THIS LINE HERE
 
     if wait_for_ssh "$vm_name"; then
         apply_post_boot_fixes "$SSH_PORT" "$USERNAME" "$PASSWORD"
