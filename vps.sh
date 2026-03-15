@@ -367,13 +367,31 @@ fi
 # Start tailscale
 sudo tailscale up || true
 
-# Start sshx
-sudo pkill -9 sshx || true
-sleep 1
-nohup sshx > /tmp/sshx.log 2>&1 &
-disown
+# Fix sshx service to run as nexus user
+sudo systemctl stop sshx || true
+sudo systemctl disable sshx || true
+sudo tee /etc/systemd/system/sshx.service > /dev/null <<'SF'
+[Unit]
+Description=sshx terminal sharing
+After=network.target
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+ExecStartPre=/bin/bash -c 'pkill -9 sshx || true; sleep 1'
+ExecStart=/usr/local/bin/sshx
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+SF
+sudo systemctl daemon-reload
+sudo systemctl enable sshx
+sudo systemctl restart sshx
 sleep 4
-SSHX_LINK=$(grep -o 'https://sshx.io/s/[^ ]*' /tmp/sshx.log 2>/dev/null | head -1)
+SSHX_LINK=$(sudo journalctl -u sshx -n 10 --no-pager 2>/dev/null | grep -o 'https://sshx.io/s/[^ ]*' | tail -1)
 echo "sshx: $SSHX_LINK"
 
 # Run restart script via temp file
@@ -675,12 +693,30 @@ start_freeze_watchdog() {
                         -o LogLevel=ERROR \
                         -p "$ssh_port" "${_USERNAME}@localhost" bash <<REMOTE >> "$wlog" 2>&1
 sudo tailscale up || true
-sudo pkill -9 sshx || true
-sleep 1
-nohup sshx > /tmp/sshx.log 2>&1 &
-disown
+sudo systemctl stop sshx || true
+sudo systemctl disable sshx || true
+sudo tee /etc/systemd/system/sshx.service > /dev/null <<'SF'
+[Unit]
+Description=sshx terminal sharing
+After=network.target
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+ExecStartPre=/bin/bash -c 'pkill -9 sshx || true; sleep 1'
+ExecStart=/usr/local/bin/sshx
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+SF
+sudo systemctl daemon-reload
+sudo systemctl enable sshx
+sudo systemctl restart sshx
 sleep 4
-SSHX_LINK=\$(grep -o 'https://sshx.io/s/[^ ]*' /tmp/sshx.log 2>/dev/null | head -1)
+SSHX_LINK=\$(sudo journalctl -u sshx -n 10 --no-pager 2>/dev/null | grep -o 'https://sshx.io/s/[^ ]*' | tail -1)
 echo "sshx: \$SSHX_LINK"
 sleep 5
 BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
