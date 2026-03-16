@@ -1,9 +1,10 @@
 #!/bin/bash
 
 ################################################################################
-# PELICAN AUTO-RESTART SCRIPT v8.0 PRODUCTION READY
+# PELICAN AUTO-RESTART SCRIPT v9.0 PRODUCTION READY
 # - FIXED: Docker starts via systemd on VMs with systemd
 # - FIXED: Falls back to manual dockerd if systemd fails
+# - ADDED: Cron, Supervisor, Queue Worker, Auto-Limits (step 5)
 ################################################################################
 
 RED='\033[0;31m'
@@ -14,7 +15,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║     Pelican Services Restart v8.0      ║${NC}"
+echo -e "${CYAN}║     Pelican Services Restart v9.0      ║${NC}"
 echo -e "${CYAN}║     Migration-Safe Restart             ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
@@ -59,7 +60,7 @@ SERVICES_STARTED=0
 # ============================================================================
 # 1. START DOCKER
 # ============================================================================
-echo -e "${CYAN}[1/7] Starting Docker...${NC}"
+echo -e "${CYAN}[1/8] Starting Docker...${NC}"
 
 if docker ps >/dev/null 2>&1; then
     echo -e "${GREEN}   ✓ Docker already running${NC}"
@@ -102,7 +103,7 @@ fi
 # ============================================================================
 # 2. START REDIS
 # ============================================================================
-echo -e "${CYAN}[2/7] Starting Redis...${NC}"
+echo -e "${CYAN}[2/8] Starting Redis...${NC}"
 
 if redis-cli ping >/dev/null 2>&1; then
     echo -e "${GREEN}   ✓ Redis already running${NC}"
@@ -123,7 +124,7 @@ fi
 # ============================================================================
 # 3. START PHP-FPM
 # ============================================================================
-echo -e "${CYAN}[3/7] Starting PHP-FPM...${NC}"
+echo -e "${CYAN}[3/8] Starting PHP-FPM...${NC}"
 
 PHP_VERSION=""
 for ver in 8.3 8.4 8.2 8.1; do
@@ -167,7 +168,7 @@ fi
 # ============================================================================
 # 4. START NGINX
 # ============================================================================
-echo -e "${CYAN}[4/7] Starting Nginx...${NC}"
+echo -e "${CYAN}[4/8] Starting Nginx...${NC}"
 
 if pgrep nginx >/dev/null && netstat -tulpn 2>/dev/null | grep -q ":8443"; then
     echo -e "${GREEN}   ✓ Nginx already running (port 8443)${NC}"
@@ -191,7 +192,7 @@ fi
 # ============================================================================
 # 5. CRON, SUPERVISOR & AUTO-LIMITS
 # ============================================================================
-echo -e "${CYAN}[5/7] Starting Cron, Supervisor & Auto-Limits...${NC}"
+echo -e "${CYAN}[5/8] Starting Cron, Supervisor & Auto-Limits...${NC}"
 
 # Cron
 service cron start 2>/dev/null || cron 2>/dev/null || true
@@ -205,6 +206,7 @@ fi
 supervisorctl reread 2>/dev/null || true
 supervisorctl update 2>/dev/null || true
 supervisorctl start pelican-queue 2>/dev/null || supervisorctl restart pelican-queue 2>/dev/null || true
+sleep 2
 pgrep -f "queue:work" >/dev/null && echo -e "${GREEN}   ✓ Queue worker running${NC}" || echo -e "${RED}   ✗ Queue worker failed${NC}"
 
 # Auto-Limits
@@ -217,13 +219,14 @@ if [ -f "/usr/local/bin/pelican-auto-resource-limits.sh" ]; then
     nohup /usr/local/bin/pelican-auto-resource-limits-fast.sh > /var/log/pelican-auto-limits-fast.log 2>&1 &
     echo -e "${GREEN}   ✓ Fast auto-limit service restarted${NC}"
 else
-    echo -e "${YELLOW}   ⚠ Resource limits script not found${NC}"
+    echo -e "${YELLOW}   ⚠ Resource limits script not found - run plugin setup first${NC}"
 fi
+((SERVICES_STARTED++))
 
 # ============================================================================
 # 6. START WINGS
 # ============================================================================
-echo -e "${CYAN}[6/7] Starting Wings...${NC}"
+echo -e "${CYAN}[6/8] Starting Wings...${NC}"
 
 if pgrep -x wings >/dev/null; then
     echo -e "${GREEN}   ✓ Wings already running${NC}"
@@ -248,7 +251,7 @@ fi
 # ============================================================================
 # 7. START CLOUDFLARE TUNNELS
 # ============================================================================
-echo -e "${CYAN}[7/7] Starting Cloudflare Tunnels...${NC}"
+echo -e "${CYAN}[7/8] Starting Cloudflare Tunnels...${NC}"
 
 pkill cloudflared 2>/dev/null || true
 sleep 2
@@ -269,11 +272,11 @@ fi
 [ "$TUNNEL_COUNT" -gt 0 ] && echo -e "${GREEN}   ✓ Started ${TUNNEL_COUNT} Cloudflare tunnel(s)${NC}" || echo -e "${YELLOW}   ⚠ No tunnel tokens found${NC}"
 
 # ============================================================================
-# CLEAR PANEL CACHE
+# 8. CLEAR PANEL CACHE
 # ============================================================================
+echo -e "${CYAN}[8/8] Clearing Panel cache...${NC}"
+
 if [ -d "/var/www/pelican" ]; then
-    echo ""
-    echo -e "${CYAN}[CACHE] Clearing Panel cache...${NC}"
     cd /var/www/pelican
     PHP_BIN="/usr/bin/php${PHP_VERSION:-8.3}"
     [ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php)
@@ -312,8 +315,10 @@ echo ""
 [ -n "$NODE_DOMAIN" ] && echo -e "${CYAN}🌐 Wings:${NC} ${GREEN}https://${NODE_DOMAIN}${NC}"
 echo ""
 echo -e "${CYAN}📝 Logs:${NC}"
-echo -e "  Wings:  ${GREEN}tail -f /tmp/wings.log${NC}"
-echo -e "  Panel:  ${GREEN}tail -f /var/log/nginx/pelican.app-error.log${NC}"
-echo -e "  Docker: ${GREEN}tail -f /var/log/docker.log${NC}"
+echo -e "  Wings:      ${GREEN}tail -f /tmp/wings.log${NC}"
+echo -e "  Panel:      ${GREEN}tail -f /var/log/nginx/pelican.app-error.log${NC}"
+echo -e "  Docker:     ${GREEN}tail -f /var/log/docker.log${NC}"
+echo -e "  Queue:      ${GREEN}tail -f /var/log/pelican-queue.log${NC}"
+echo -e "  Auto-Limits:${GREEN}tail -f /var/log/pelican-auto-limits-fast.log${NC}"
 echo ""
-echo "restart.sh updated!"
+echo "restart.sh v9.0"
