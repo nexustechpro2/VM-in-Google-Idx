@@ -275,25 +275,28 @@ echo -e "${CYAN}[5/20] Installing PHP 8.3+...${NC}"
 
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
 
-if command -v add-apt-repository &> /dev/null; then
-    add-apt-repository ppa:ondrej/php -y 2>&1 | grep -v "GPG error" || true
-fi
+# Add PHP repository properly
+apt install -y ca-certificates apt-transport-https software-properties-common 2>/dev/null || true
+LC_ALL=C.UTF-8 add-apt-repository ppa:ondrej/php -y 2>/dev/null || true
+apt update -qq 2>/dev/null || true
 
-apt update -qq 2>&1 | grep -v "GPG error" || true
-
-apt install -y \
-    php8.3 php8.3-cli php8.3-fpm php8.3-mysql php8.3-pgsql php8.3-sqlite3 \
-    php8.3-redis php8.3-intl php8.3-zip php8.3-bcmath php8.3-mbstring \
-    php8.3-xml php8.3-curl php8.3-gd \
-    2>/dev/null || {
+# Try PHP 8.3 first, fallback to 8.2
+if apt install -y php8.3 php8.3-cli php8.3-fpm php8.3-pgsql php8.3-mysql \
+    php8.3-sqlite3 php8.3-redis php8.3-intl php8.3-zip php8.3-bcmath \
+    php8.3-mbstring php8.3-xml php8.3-curl php8.3-gd 2>/dev/null; then
+    PHP_VERSION="8.3"
+elif apt install -y php8.2 php8.2-cli php8.2-fpm php8.2-pgsql php8.2-mysql \
+    php8.2-sqlite3 php8.2-redis php8.2-intl php8.2-zip php8.2-bcmath \
+    php8.2-mbstring php8.2-xml php8.2-curl php8.2-gd 2>/dev/null; then
+    PHP_VERSION="8.2"
+else
     echo -e "${RED}❌ PHP installation failed!${NC}"
     exit 1
-}
+fi
 
-update-alternatives --install /usr/bin/php php /usr/bin/php8.3 100 2>/dev/null || true
-update-alternatives --set php /usr/bin/php8.3 2>/dev/null || true
+update-alternatives --install /usr/bin/php php /usr/bin/php${PHP_VERSION} 100 2>/dev/null || true
+update-alternatives --set php /usr/bin/php${PHP_VERSION} 2>/dev/null || true
 
-PHP_VERSION="8.3"
 echo -e "${GREEN}   ✓ PHP $(php -v | head -n1 | cut -d' ' -f2)${NC}"
 
 # ============================================================================
