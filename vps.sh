@@ -291,7 +291,7 @@ build_qemu_cmd() {
     local cmd=(
         qemu-system-x86_64
         $kvm_flag
-        -machine q35,mem-merge=off
+        -machine q35,mem-merge=off,hpet=off
         -m "$MEMORY"
         -smp "$CPUS"
         -cpu host,+x2apic
@@ -304,7 +304,6 @@ build_qemu_cmd() {
         -device virtio-rng-pci,rng=rng0
         -device virtio-balloon-pci
         -global kvm-pit.lost_tick_policy=delay
-        -no-hpet
         -rtc base=utc,clock=host,driftfix=slew
         -watchdog-action reset
         -serial "file:$serial_log"
@@ -671,14 +670,14 @@ start_freeze_watchdog() {
             cpus=$(grep ^CPUS "$_BACKUP_DIR/$vm.conf" 2>/dev/null | cut -d'"' -f2)
             ssh_port=$(grep ^SSH_PORT "$_BACKUP_DIR/$vm.conf" 2>/dev/null | cut -d'"' -f2)
 
-            local qcmd="qemu-system-x86_64 $kvm_flag -machine q35,mem-merge=off -m $mem -smp $cpus -cpu host,+x2apic"
+            local qcmd="qemu-system-x86_64 $kvm_flag -machine q35,mem-merge=off,hpet=off -m $mem -smp $cpus -cpu host,+x2apic"
             qcmd+=" -drive file=$live_img,format=qcow2,if=virtio,cache=writeback,discard=unmap,aio=threads"
             qcmd+=" -drive file=$_BACKUP_DIR/$vm-seed.iso,format=raw,if=virtio,cache=writeback"
             qcmd+=" -boot order=c -device virtio-net-pci,netdev=n0"
             qcmd+=" -netdev user,id=n0,hostfwd=tcp::${ssh_port}-:22"
             qcmd+=" -object rng-random,filename=/dev/urandom,id=rng0"
             qcmd+=" -device virtio-rng-pci,rng=rng0 -device virtio-balloon-pci"
-            qcmd+=" -global kvm-pit.lost_tick_policy=delay -no-hpet"
+            qcmd+=" -global kvm-pit.lost_tick_policy=delay"
             qcmd+=" -rtc base=utc,clock=host,driftfix=slew -watchdog-action reset"
             qcmd+=" -serial file:$serial -display none -daemonize"
             qcmd+=" -pidfile $_BACKUP_DIR/$vm.pid"
