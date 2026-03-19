@@ -282,10 +282,10 @@ build_qemu_cmd() {
     local seed_file="$BACKUP_DIR/$vm_name-seed.iso"
     local serial_log="$BACKUP_DIR/$vm_name.serial.log"
 
-    local kvm_flag="-enable-kvm"
+    local kvm_flag="-enable-kvm -cpu host,+x2apic"
     if [[ ! -w /dev/kvm ]]; then
         print_status "WARN" "KVM not available — using TCG"
-        kvm_flag="-accel tcg,thread=multi"
+        kvm_flag="-accel tcg,thread=multi -cpu qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt"
     fi
 
     local cmd=(
@@ -303,6 +303,10 @@ build_qemu_cmd() {
         -object rng-random,filename=/dev/urandom,id=rng0
         -device virtio-rng-pci,rng=rng0
         -device virtio-balloon-pci
+        -global kvm-pit.lost_tick_policy=delay
+        -no-hpet
+        -rtc base=utc,clock=host,driftfix=slew
+        -watchdog-action reset
         -serial "file:$serial_log"
         -display none
         -daemonize
@@ -660,8 +664,8 @@ start_freeze_watchdog() {
             echo "[$(date '+%H:%M:%S')] Step 4: Restarting VM..." >> "$wlog"
             rm -f "$serial"
 
-            local kvm_flag="-enable-kvm"
-            [[ ! -w /dev/kvm ]] && kvm_flag="-accel tcg,thread=multi"
+            local kvm_flag="-enable-kvm -cpu host,+x2apic"
+            [[ ! -w /dev/kvm ]] && kvm_flag="-accel tcg,thread=multi -cpu qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt"
             local mem cpus ssh_port
             mem=$(grep ^MEMORY "$_BACKUP_DIR/$vm.conf" 2>/dev/null | cut -d'"' -f2)
             cpus=$(grep ^CPUS "$_BACKUP_DIR/$vm.conf" 2>/dev/null | cut -d'"' -f2)
@@ -674,6 +678,8 @@ start_freeze_watchdog() {
             qcmd+=" -netdev user,id=n0,hostfwd=tcp::${ssh_port}-:22"
             qcmd+=" -object rng-random,filename=/dev/urandom,id=rng0"
             qcmd+=" -device virtio-rng-pci,rng=rng0 -device virtio-balloon-pci"
+            qcmd+=" -global kvm-pit.lost_tick_policy=delay -no-hpet"
+            qcmd+=" -rtc base=utc,clock=host,driftfix=slew -watchdog-action reset"
             qcmd+=" -serial file:$serial -display none -daemonize"
             qcmd+=" -pidfile $_BACKUP_DIR/$vm.pid"
 
