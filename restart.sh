@@ -334,4 +334,18 @@ echo -e "  Docker:     ${GREEN}tail -f /var/log/docker.log${NC}"
 echo -e "  Queue:      ${GREEN}tail -f /var/log/pelican-queue.log${NC}"
 echo -e "  Auto-Limits:${GREEN}tail -f /var/log/pelican-auto-limits-fast.log${NC}"
 echo ""
+# Lock DNS permanently
+systemctl stop systemd-resolved 2>/dev/null || true
+rm -f /etc/resolv.conf
+echo "nameserver 1.1.1.1
+nameserver 8.8.8.8" > /etc/resolv.conf
+chattr +i /etc/resolv.conf 2>/dev/null || mount --bind /etc/resolv.conf /etc/resolv.conf
+
+# Fix Docker DNS
+echo '{
+  "dns": ["1.1.1.1", "8.8.8.8"],
+  "dns-opts": ["ndots:0", "timeout:1", "attempts:1"],
+  "mtu": 1450
+}' > /etc/docker/daemon.json
+
 echo "restart.sh v9.0"
