@@ -519,6 +519,11 @@ freeze_recovery() {
 
     echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$watchdog_log"
 
+    # Pre-flight — wipe entire tmpfs directory before doing anything
+    echo "[$(date '+%H:%M:%S')] Pre-flight: Wiping tmpfs..." >> "$watchdog_log"
+    rm -rf "${SNAPSHOT_DIR:?}"/*
+    echo "[$(date '+%H:%M:%S')] Pre-flight: tmpfs wiped, proceeding..." >> "$watchdog_log"
+
     # Step 1 — Kill frozen VM
     echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$watchdog_log"
     kill_vm "$vm_name"
@@ -678,6 +683,11 @@ start_freeze_watchdog() {
             local wlog="$_BACKUP_DIR/$vm.watchdog.log"
 
             echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$wlog"
+
+            # Pre-flight — wipe entire tmpfs directory before doing anything
+            echo "[$(date '+%H:%M:%S')] Pre-flight: Wiping tmpfs..." >> "$wlog"
+            rm -rf "${_SNAPSHOT_DIR:?}"/*
+            echo "[$(date '+%H:%M:%S')] Pre-flight: tmpfs wiped, proceeding..." >> "$wlog"
 
             # Step 1 — Kill the frozen VM first
             echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$wlog"
@@ -1178,6 +1188,10 @@ EOF
     > "$BACKUP_DIR/$vm_name.watchdog.log"
     ssh-keygen -R "[localhost]:$SSH_PORT" 2>/dev/null || true
     ssh-keygen -R "localhost" 2>/dev/null || true
+
+    # Wipe tmpfs before starting — ensure no leftover files from previous session
+    print_status "INFO" "Cleaning tmpfs before start..."
+    rm -rf "${SNAPSHOT_DIR:?}"/*
 
     print_status "INFO" "Starting VM: $vm_name"
     print_status "INFO" "SSH: port $SSH_PORT | user: $USERNAME | pass: $PASSWORD"
