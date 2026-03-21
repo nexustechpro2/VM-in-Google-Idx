@@ -647,7 +647,7 @@ freeze_recovery() {
     local tmp_c="${snap_compressed}.compressing"
     rm -f "$tmp_c" "$snap_compressed"
 
-    if ! qemu-img convert -O qcow2 -c "$live_img" "$tmp_c" >> "$watchdog_log" 2>&1; then
+    if ! qemu-img convert -O qcow2 -c -o cluster_size=4k "$live_img" "$tmp_c" >> "$watchdog_log" 2>&1; then
         echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$watchdog_log"
         rm -f "$tmp_c"
         return 1
@@ -660,7 +660,7 @@ freeze_recovery() {
     local restore_tmp="${live_img}.restoring"
     rm -f "$live_img" "$restore_tmp"
 
-    qemu-img convert -O qcow2 -c "$snap_compressed" "$restore_tmp" >> "$watchdog_log" 2>&1 &
+    qemu-img convert -O qcow2 -c -o cluster_size=4k "$snap_compressed" "$restore_tmp" >> "$watchdog_log" 2>&1 &
     local compress_pid=$!
     local elapsed=0
     local success=false
@@ -812,7 +812,7 @@ start_freeze_watchdog() {
             local tmp_c="${snap_compressed}.compressing"
             rm -f "$tmp_c" "$snap_compressed"
 
-            if ! qemu-img convert -O qcow2 -c "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
+            if ! qemu-img convert -O qcow2 -c -o cluster_size=4k "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
                 echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$wlog"
                 rm -f "$tmp_c"
                 return 1
