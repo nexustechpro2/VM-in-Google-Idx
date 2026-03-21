@@ -28,7 +28,7 @@ WHITE='\033[0;97m'
 NC='\033[0m'
 
 # --- DIRECTORIES ---
-BACKUP_DIR="${BACKUP_DIR:-$HOME/vms}"
+BACKUP_DIR="${BACKUP_DIR:-/home/user/vms}"
 SNAPSHOT_DIR="/nexusvms"
 
 # ============================================================================
