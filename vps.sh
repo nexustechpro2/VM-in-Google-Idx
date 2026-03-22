@@ -295,7 +295,8 @@ if command -v docker &>/dev/null; then
     sudo tee /etc/docker/daemon.json > /dev/null <<'DF'
 {
   "dns": ["8.8.8.8","1.1.1.1"],
-  "dns-opts": ["ndots:0"],
+  "dns-opts": ["ndots:0", "timeout:1", "attempts:1"],
+  "mtu": 1450,
   "log-driver": "json-file",
   "log-opts": {"max-size":"10m","max-file":"3"},
   "iptables": true,
@@ -361,6 +362,12 @@ if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
     curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh \
         && sudo bash /tmp/nexus-restart.sh \
         && rm -f /tmp/nexus-restart.sh
+    # Fix PHP-FPM
+    sudo systemctl restart php8.3-fpm || true
+    # Fix Cloudflare
+    sudo systemctl restart cloudflared || true
+    # Clear cache
+    cd /var/www/pelican && sudo php artisan cache:clear && sudo php artisan config:clear || true
 fi
 REMOTE
 
