@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # =============================
-# Enhanced Multi-VM Manager v4.0
+# Enhanced Multi-VM Manager v4.1
 # Created by NexusTechPro
-# Fixes in v4.0:
+# Fixes in v4.1:
 #   - TCG full support (no KVM needed) — correct cpu flags, no x2apic, no host cpu
 #   - Color code crash in subshells fixed — colors redefined inside every subshell
 #   - Network speed tuned — queue sizes, BBR, sysctl inside VM
@@ -12,9 +12,13 @@ set -euo pipefail
 #   - Anti-freeze: i6300esb watchdog, disable S3/S4, mem-prealloc
 #   - iothread for faster disk I/O
 #   - cpu performance governor auto-set on TCG
+#   - Freeze recovery: compress to tmpfs, compress back to home (zstd, 20 min timeout)
+#   - tmpfs wiped on startup and before every recovery
+#   - BACKUP_DIR fixed for Google idx (/home/user/vms)
+#   - VNC + websockify + Firefox auto-restore on every boot and recovery
 #
 # Architecture:
-#   - /home/vms/name.img              = live running image (QEMU reads natively)
+#   - /home/user/vms/name.img         = live running image (QEMU reads natively)
 #   - /nexusvms/name.img.compressed   = compressed snapshot (created only on freeze, cleared after restore)
 # =============================
 
@@ -39,7 +43,7 @@ display_header() {
     clear
     echo -e "${BLUE}========================================================================"
     echo -e "  Created by NexusTechPro"
-    echo -e "  Enhanced Multi-VM Manager v4.0"
+    echo -e "  Enhanced Multi-VM Manager v4.1"
     echo -e "========================================================================${NC}"
     echo
 }
@@ -144,7 +148,6 @@ EOF
 
 # ============================================================================
 # ACCELERATION DETECTION
-# Returns two variables: sets QEMU_ACCEL_FLAGS and QEMU_CPU_FLAGS
 # Never mixes -cpu host with TCG — that was the root cause of the crash
 # ============================================================================
 detect_acceleration() {
@@ -153,15 +156,11 @@ detect_acceleration() {
         QEMU_CPU_FLAGS="-cpu host,+x2apic"
         ACCEL_MODE="kvm"
     else
-        # TCG — use 'max' cpu model which is the best TCG can offer natively
-        # 'max' exposes all features TCG actually supports, no unsupported flags
         QEMU_ACCEL_FLAGS="-accel tcg,thread=multi,tb-size=512"
         QEMU_CPU_FLAGS="-cpu max"
         ACCEL_MODE="tcg"
-        # Push CPU to performance mode for better TCG throughput
         echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/governor \
             >/dev/null 2>&1 || true
-        # Higher priority for QEMU process
         renice -n -5 $$ >/dev/null 2>&1 || true
     fi
 }
@@ -171,20 +170,16 @@ detect_acceleration() {
 # ============================================================================
 build_and_run_qemu() {
     local vm_name=$1
-    local extra_args="${2:-}"   # optional: pass ">> logfile 2>&1" etc
     local live_img="$BACKUP_DIR/$vm_name.img"
     local seed_file="$BACKUP_DIR/$vm_name-seed.iso"
     local serial_log="$BACKUP_DIR/$vm_name.serial.log"
 
-    # detect_acceleration sets QEMU_ACCEL_FLAGS, QEMU_CPU_FLAGS, ACCEL_MODE
-    # directly in THIS shell — globals are alive when qemu runs below
     detect_acceleration
 
     if [[ "$ACCEL_MODE" == "tcg" ]]; then
         print_status "WARN" "KVM not available — using optimized TCG"
     fi
 
-    # Build port forwards
     local netdev_extra=""
     if [[ -n "${PORT_FORWARDS:-}" ]]; then
         IFS=',' read -ra forwards <<< "$PORT_FORWARDS"
@@ -221,7 +216,6 @@ build_and_run_qemu() {
         -daemonize \
         -pidfile "$BACKUP_DIR/$vm_name.pid"
 }
-
 
 # ============================================================================
 # SSH CHECK — banner check, not just TCP (frozen VMs accept TCP but no banner)
@@ -313,35 +307,27 @@ fi
 
 # ---- Network performance tuning ----
 sudo tee /etc/sysctl.d/99-network-perf.conf > /dev/null <<'SYSCTL'
-# Large socket buffers
 net.core.rmem_max=134217728
 net.core.wmem_max=134217728
 net.ipv4.tcp_rmem=4096 87380 134217728
 net.ipv4.tcp_wmem=4096 65536 134217728
-# High backlog
 net.core.netdev_max_backlog=300000
 net.core.somaxconn=65535
-# BBR congestion control — much faster than default cubic
 net.ipv4.tcp_congestion_control=bbr
 net.core.default_qdisc=fq
-# TCP fast open
 net.ipv4.tcp_fastopen=3
-# IP forwarding (needed for docker etc)
 net.ipv4.ip_forward=1
 net.bridge.bridge-nf-call-iptables=1
-# Reduce TIME_WAIT
 net.ipv4.tcp_tw_reuse=1
 net.ipv4.tcp_fin_timeout=15
 SYSCTL
-
-# Load BBR module
 sudo modprobe tcp_bbr 2>/dev/null || true
 sudo sysctl -p /etc/sysctl.d/99-network-perf.conf 2>/dev/null || true
 
 # ---- Tailscale ----
 sudo tailscale up 2>/dev/null || true
 
-# ---- sshx service (run as nexus user) ----
+# ---- sshx service ----
 sudo systemctl stop sshx 2>/dev/null || true
 sudo systemctl disable sshx 2>/dev/null || true
 sudo tee /etc/systemd/system/sshx.service > /dev/null <<'SSHXSF'
@@ -379,8 +365,6 @@ fi
 REMOTE
 
     # ---- VNC + websockify + Firefox — separate root SSH call ----
-    # Must be a separate call with unquoted heredoc so $pass expands correctly
-    # and runs as root directly
     print_status "INFO" "Setting up VNC + Firefox auto-restore..."
     sshpass -p "$pass" ssh $ssh_opts -p "$port" "root@localhost" bash <<REMOTE
 set -e
@@ -495,7 +479,7 @@ REMOTE
 }
 
 # ============================================================================
-# CLOUDFLARE TUNNEL SETUP (public URL from private/NAT network)
+# CLOUDFLARE TUNNEL SETUP
 # ============================================================================
 setup_cloudflare_tunnel() {
     local port=$1
@@ -512,14 +496,11 @@ setup_cloudflare_tunnel() {
     local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
 
     sshpass -p "$pass" ssh $ssh_opts -p "$port" "${user}@localhost" bash <<REMOTE
-# Install cloudflared if not present
 if ! command -v cloudflared &>/dev/null; then
     curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
         -o /usr/local/bin/cloudflared
     chmod +x /usr/local/bin/cloudflared
 fi
-
-# Create systemd service for persistent tunnel
 sudo tee /etc/systemd/system/cloudflared-tunnel.service > /dev/null <<'CF'
 [Unit]
 Description=Cloudflare Tunnel
@@ -538,7 +519,6 @@ sudo systemctl daemon-reload
 sudo systemctl enable cloudflared-tunnel
 sudo systemctl restart cloudflared-tunnel
 sleep 5
-# Print the public URL
 sudo journalctl -u cloudflared-tunnel -n 20 --no-pager 2>/dev/null \
     | grep -o 'https://.*\.trycloudflare\.com' | tail -1 \
     | xargs -I{} echo "Public URL: {}"
@@ -635,21 +615,20 @@ freeze_recovery() {
     # Pre-flight — wipe entire tmpfs directory before doing anything
     echo "[$(date '+%H:%M:%S')] Pre-flight: Wiping tmpfs..." >> "$watchdog_log"
     rm -rf "${SNAPSHOT_DIR:?}"/*
-    echo "[$(date '+%H:%M:%S')] Pre-flight: tmpfs wiped, proceeding..." >> "$watchdog_log"
-    # Ensure SNAPSHOT_DIR exists after wipe
     mkdir -p "${SNAPSHOT_DIR:?}"
+    echo "[$(date '+%H:%M:%S')] Pre-flight: tmpfs wiped, proceeding..." >> "$watchdog_log"
 
     # Step 1 — Kill frozen VM
     echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$watchdog_log"
     kill_vm "$vm_name"
     sleep 2
 
-    # Step 2 — Compress live image to tmpfs
+    # Step 2 — Compress live image to tmpfs (zstd)
     echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$watchdog_log"
     local tmp_c="${snap_compressed}.compressing"
     rm -f "$tmp_c" "$snap_compressed"
 
-    if ! qemu-img convert -O qcow2 -c "$live_img" "$tmp_c" >> "$watchdog_log" 2>&1; then
+    if ! qemu-img convert -O qcow2 -c -o compression_type=zstd "$live_img" "$tmp_c" >> "$watchdog_log" 2>&1; then
         echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$watchdog_log"
         rm -f "$tmp_c"
         return 1
@@ -657,17 +636,17 @@ freeze_recovery() {
     mv "$tmp_c" "$snap_compressed"
     echo "[$(date '+%H:%M:%S')] Compressed to tmpfs: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$watchdog_log"
 
-    # Step 3 — Compress back to /home with 5 min timeout
-    echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (5 min timeout)..." >> "$watchdog_log"
+    # Step 3 — Compress back to /home with 20 min timeout
+    echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$watchdog_log"
     local restore_tmp="${live_img}.restoring"
     rm -f "$live_img" "$restore_tmp"
 
-    qemu-img convert -O qcow2 -c "$snap_compressed" "$restore_tmp" >> "$watchdog_log" 2>&1 &
+    qemu-img convert -O qcow2 -c -o compression_type=zstd "$snap_compressed" "$restore_tmp" >> "$watchdog_log" 2>&1 &
     local compress_pid=$!
     local elapsed=0
     local success=false
 
-    while [[ $elapsed -lt 300 ]]; do
+    while [[ $elapsed -lt 1200 ]]; do
         if ! kill -0 "$compress_pid" 2>/dev/null; then
             if [[ -f "$restore_tmp" ]] && qemu-img check "$restore_tmp" >> "$watchdog_log" 2>&1; then
                 success=true
@@ -699,7 +678,7 @@ freeze_recovery() {
 
     # Step 4 — Clear tmpfs
     echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$watchdog_log"
-    rm -f "$snap_compressed"
+    rm -rf "${SNAPSHOT_DIR:?}"/*
 
     # Step 5 — Restart VM
     echo "[$(date '+%H:%M:%S')] Step 5: Restarting VM..." >> "$watchdog_log"
@@ -745,14 +724,12 @@ start_freeze_watchdog() {
     local _CPUS="$CPUS"
 
     (
-        # Redefine colors inside subshell — prevents $'\E[1' command not found crash
         RED='\033[0;31m'
         GREEN='\033[0;32m'
         YELLOW='\033[1;33m'
         CYAN='\033[0;36m'
         NC='\033[0m'
 
-        # ---- SSH banner check ----
         check_ssh_local() {
             local port=$1
             local banner
@@ -761,7 +738,6 @@ start_freeze_watchdog() {
             return 1
         }
 
-        # ---- Kill VM ----
         kill_vm_local() {
             local vm=$1
             local pid_file="$_BACKUP_DIR/$vm.pid"
@@ -778,7 +754,6 @@ start_freeze_watchdog() {
             pkill -f "qemu-system-x86_64.*$_BACKUP_DIR/$vm" 2>/dev/null || true
         }
 
-        # ---- Inline acceleration detection (no function call from parent scope) ----
         get_accel_flags() {
             if [[ -w /dev/kvm ]]; then
                 echo "-enable-kvm|-cpu host,+x2apic"
@@ -789,8 +764,7 @@ start_freeze_watchdog() {
             fi
         }
 
-        # ---- Full recovery inline ----
-            recover_local() {
+        recover_local() {
             local vm=$1
             local live_img="$_BACKUP_DIR/$vm.img"
             local snap_compressed="$_SNAPSHOT_DIR/$vm.img.compressed"
@@ -802,22 +776,20 @@ start_freeze_watchdog() {
             # Pre-flight — wipe entire tmpfs directory before doing anything
             echo "[$(date '+%H:%M:%S')] Pre-flight: Wiping tmpfs..." >> "$wlog"
             rm -rf "${_SNAPSHOT_DIR:?}"/*
+            mkdir -p "${_SNAPSHOT_DIR:?}"
             echo "[$(date '+%H:%M:%S')] Pre-flight: tmpfs wiped, proceeding..." >> "$wlog"
-
-            # Ensure SNAPSHOT_DIR exists after wipe
-            mkdir -p "${SNAPSHOT_DIR:?}"
 
             # Step 1 — Kill the frozen VM first
             echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$wlog"
             kill_vm_local "$vm"
             sleep 2
 
-            # Step 2 — Compress live image directly to tmpfs
+            # Step 2 — Compress live image directly to tmpfs (zstd)
             echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$wlog"
             local tmp_c="${snap_compressed}.compressing"
             rm -f "$tmp_c" "$snap_compressed"
 
-            if ! qemu-img convert -O qcow2 -c "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
+            if ! qemu-img convert -O qcow2 -c -o compression_type=zstd "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
                 echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$wlog"
                 rm -f "$tmp_c"
                 return 1
@@ -825,21 +797,18 @@ start_freeze_watchdog() {
             mv "$tmp_c" "$snap_compressed"
             echo "[$(date '+%H:%M:%S')] Compressed to tmpfs: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$wlog"
 
-            # Step 3 — Compress back from tmpfs to /home with 5 min timeout
-            # If it takes longer than 5 mins, kill it and just copy directly
-            echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (5 min timeout)..." >> "$wlog"
+            # Step 3 — Compress back to /home with 20 min timeout
+            echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$wlog"
             local restore_tmp="${live_img}.restoring"
             rm -f "$live_img" "$restore_tmp"
 
-            # Run compress-back in background, watch it with a timeout
-            qemu-img convert -O qcow2 -c "$snap_compressed" "$restore_tmp" >> "$wlog" 2>&1 &
+            qemu-img convert -O qcow2 -c -o compression_type=zstd "$snap_compressed" "$restore_tmp" >> "$wlog" 2>&1 &
             local compress_pid=$!
             local elapsed=0
             local success=false
 
-            while [[ $elapsed -lt 300 ]]; do
+            while [[ $elapsed -lt 1200 ]]; do
                 if ! kill -0 "$compress_pid" 2>/dev/null; then
-                    # Process finished — check if output exists and is valid
                     if [[ -f "$restore_tmp" ]] && qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
                         success=true
                     fi
@@ -850,7 +819,6 @@ start_freeze_watchdog() {
             done
 
             if [[ "$success" == false ]]; then
-                # Timeout or failed — kill compress job, delete partial output, copy directly
                 kill "$compress_pid" 2>/dev/null || true
                 wait "$compress_pid" 2>/dev/null || true
                 rm -f "$restore_tmp"
@@ -871,7 +839,7 @@ start_freeze_watchdog() {
 
             # Step 4 — Clear tmpfs
             echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$wlog"
-            rm -f "$snap_compressed"
+            rm -rf "${_SNAPSHOT_DIR:?}"/*
 
             # Step 5 — Restart VM
             echo "[$(date '+%H:%M:%S')] Step 5: Restarting VM..." >> "$wlog"
@@ -1095,7 +1063,7 @@ setup_vm_image() {
     qemu-img resize "$base_img" "$DISK_SIZE" 2>/dev/null || true
 
     print_status "INFO" "Compressing base image..."
-    qemu-img convert -O qcow2 -c "$base_img" "$BACKUP_DIR/$VM_NAME.img"
+    qemu-img convert -O qcow2 -c -o compression_type=zstd "$base_img" "$BACKUP_DIR/$VM_NAME.img"
     rm -f "$base_img"
 
     cat > /tmp/vps-user-data <<EOF
@@ -1301,7 +1269,6 @@ EOF
         cloud-localds "$SEED_FILE" /tmp/vps-user-data /tmp/vps-meta-data
     fi
 
-
     rm -f "$BACKUP_DIR/$vm_name.serial.log"
     > "$BACKUP_DIR/$vm_name.watchdog.log"
     ssh-keygen -R "[localhost]:$SSH_PORT" 2>/dev/null || true
@@ -1315,7 +1282,7 @@ EOF
     print_status "INFO" "Starting VM: $vm_name"
     print_status "INFO" "SSH: port $SSH_PORT | user: $USERNAME | pass: $PASSWORD"
 
-if ! build_and_run_qemu "$vm_name"; then
+    if ! build_and_run_qemu "$vm_name"; then
         print_status "ERROR" "Failed to start QEMU"
         return 1
     fi
@@ -1326,7 +1293,6 @@ if ! build_and_run_qemu "$vm_name"; then
         sleep 10
         apply_post_boot_fixes "$SSH_PORT" "$USERNAME" "$PASSWORD"
 
-        # Offer Cloudflare tunnel for public access
         echo ""
         read -p "$(print_status "INPUT" "Set up Cloudflare tunnel for public access? (y/N): ")" cf_choice
         if [[ "$cf_choice" =~ ^[Yy]$ ]]; then
@@ -1391,7 +1357,7 @@ show_vm_info() {
     is_vm_running "$vm_name" && status="Running"
 
     local snap_status="Only created during freeze recovery"
-    [[ -f "$SNAPSHOT_COMPRESSED" ]] && snap_status="Compressed ($(du -sh "$SNAPSHOT_COMPRESSED" | awk '{print $1}')) — ready"
+    [[ -f "$SNAPSHOT_COMPRESSED" ]] && snap_status="Compressed ($(du -sh "$SNAPSHOT_COMPRESSED" | awk '{print $1}')) — active recovery"
     [[ -f "${SNAPSHOT_COMPRESSED}.compressing" ]] && snap_status="Compressing in progress..."
 
     local accel="KVM"
