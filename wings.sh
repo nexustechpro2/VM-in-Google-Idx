@@ -181,7 +181,8 @@ if [ "$IS_CONTAINER" = true ]; then
     cat > /etc/docker/daemon.json <<'DEOF'
 {
   "dns": ["8.8.8.8", "1.1.1.1", "8.8.4.4"],
-  "dns-opts": ["ndots:0"],
+  "dns-opts": ["ndots:0", "timeout:1", "attempts:1"],
+  "mtu": 1450
   "iptables": false,
   "ip6tables": false,
   "ipv6": false,
@@ -196,7 +197,8 @@ else
     cat > /etc/docker/daemon.json <<'DEOF'
 {
   "dns": ["8.8.8.8", "1.1.1.1", "8.8.4.4"],
-  "dns-opts": ["ndots:0"],
+  "dns-opts": ["ndots:0", "timeout:1", "attempts:1"],
+  "mtu": 1450
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"}
 }
