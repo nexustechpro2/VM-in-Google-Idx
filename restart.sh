@@ -297,9 +297,7 @@ if [ -d "/var/www/pelican" ]; then
     $PHP_BIN artisan view:clear >/dev/null 2>&1 || true
     $PHP_BIN artisan route:clear >/dev/null 2>&1 || true
     rm -rf storage/framework/views/* storage/framework/cache/* 2>/dev/null || true
-    redis-cli FLUSHDB >/dev/null 2>redis-cli FLUSHDB >/dev/null 2>&1 || true1 || true
-echo "nameserver 1.1.1.1
-nameserver 8.8.8.8" > /etc/resolv.conf
+redis-cli FLUSHDB >/dev/null 2>&1 || true
     echo -e "${GREEN}   ✓ Cache cleared${NC}"
 fi
 
@@ -334,16 +332,5 @@ echo -e "  Docker:     ${GREEN}tail -f /var/log/docker.log${NC}"
 echo -e "  Queue:      ${GREEN}tail -f /var/log/pelican-queue.log${NC}"
 echo -e "  Auto-Limits:${GREEN}tail -f /var/log/pelican-auto-limits-fast.log${NC}"
 echo ""
-# Lock DNS permanently (skip if already locked)
-systemctl stop systemd-resolved 2>/dev/null || true
-if chattr +i /etc/resolv.conf 2>/dev/null; then
-    true
-else
-    chattr -i /etc/resolv.conf 2>/dev/null || true
-    rm -f /etc/resolv.conf
-    echo "nameserver 1.1.1.1
-nameserver 8.8.8.8" > /etc/resolv.conf
-    chattr +i /etc/resolv.conf 2>/dev/null || mount --bind /etc/resolv.conf /etc/resolv.conf
-fi
 
 echo "restart.sh v9.0"
