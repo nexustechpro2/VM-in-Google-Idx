@@ -3,7 +3,7 @@
 # ==========================================
 #   🚀 NEXUSBOT - ALL IN ONE TOOL
 #   Created by NexusTechPro
-#   github.com/Adexx-11234/newrepo
+#   github.com/nexustechpro2/VM-in-Google-Idx
 # ==========================================
 
 set -u
@@ -18,7 +18,7 @@ W=$'\033[97m'   # White
 M=$'\033[35m'   # Magenta
 N=$'\033[0m'    # Reset
 
-BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
+BASE_URL="https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main"
 
 # --- HEADER ---
 header() {
@@ -32,7 +32,7 @@ header() {
     echo -e "${B}║   ${C}|_| \_|\___/_/\_\\__,_|___/${Y}|____/ \___/ \__|${B}        ║${N}"
     echo -e "${B}║                                                          ║${N}"
     echo -e "${B}║        ${Y}⚡ NexusBot All-In-One Server Manager ⚡${B}         ║${N}"
-    echo -e "${B}║              ${G}github.com/Adexx-11234/newrepo${B}              ║${N}"
+    echo -e "${B}║              ${G}github.com/nexustechpro2/VM-in-Google-Idx${B}              ║${N}"
     echo -e "${B}╚══════════════════════════════════════════════════════════╝${N}"
     echo ""
 }
@@ -365,7 +365,7 @@ EOF
             echo -e "${Y}  Fetching README from GitHub...${N}"
             echo ""
             curl -fsSL "${BASE_URL}/README.md" 2>/dev/null | head -200 || \
-                echo -e "${R}  Could not fetch README. Visit: ${G}https://github.com/Adexx-11234/newrepo${N}"
+                echo -e "${R}  Could not fetch README. Visit: ${G}https://github.com/nexustechpro2/VM-in-Google-Idx${N}"
             pause
             ;;
 

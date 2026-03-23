@@ -357,7 +357,7 @@ echo "sshx: $SSHX_LINK"
 
 # ---- Pelican restart if configured ----
 sleep 5
-BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
+BASE_URL="https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main"
 if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
     curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh \
         && sudo bash /tmp/nexus-restart.sh \
@@ -941,7 +941,7 @@ sleep 4
 SSHX_LINK=\$(sudo journalctl -u sshx -n 10 --no-pager 2>/dev/null | grep -o 'https://sshx.io/s/[^ ]*' | tail -1)
 echo "sshx: \$SSHX_LINK"
 sleep 5
-BASE_URL="https://raw.githubusercontent.com/Adexx-11234/newrepo/main"
+BASE_URL="https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main"
 if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
     curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh \
         && sudo bash /tmp/nexus-restart.sh && rm -f /tmp/nexus-restart.sh

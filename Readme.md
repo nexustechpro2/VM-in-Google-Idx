@@ -2,7 +2,7 @@
 
 > **Complete guide** for running a 24/7 Ubuntu server on Google IDX with Pelican Panel, Wings, Cloudflare Tunnel, Tailscale, and Remote Desktop.
 
-**Created by NexusTechPro** | [GitHub](https://github.com/Adexx-11234/newrepo)
+**Created by NexusTechPro** | [GitHub](https://github.com/nexustechpro2/VM-in-Google-Idx)
 
 ---
 
@@ -104,13 +104,13 @@ node-1.yourdomain.com    → Wings Node
 
 ```bash
 # On your Ubuntu server inside IDX:
-curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/main.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/main.sh | bash
 ```
 
 Or download and run:
 
 ```bash
-wget https://raw.githubusercontent.com/Adexx-11234/newrepo/main/main.sh
+wget https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/main.sh
 chmod +x main.sh
 bash main.sh
 ```
@@ -176,7 +176,7 @@ Save the file — IDX will rebuild the environment automatically.
 
 ```bash
 # Run the VPS installer
-bash <(curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/vps.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/vps.sh)
 ```
 
 This will:
@@ -202,7 +202,7 @@ Or use the VM manager menu to connect automatically.
 Run this **inside your Ubuntu VM** to set up all remote access tools:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/nexus-setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/nexus-setup.sh | bash
 ```
 
 ### What it installs:
@@ -300,7 +300,7 @@ Use [Supabase](https://supabase.com) (free PostgreSQL):
 ### Step 3 — Install Panel
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/panel.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/panel.sh | bash
 ```
 
 **You will be asked for:**
@@ -367,7 +367,7 @@ Scheme:         https
 ### Step 3 — Install Wings
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/wings.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/wings.sh | bash
 ```
 
 **You will be asked for:**
@@ -437,7 +437,7 @@ Expected response (this is correct!):
 Enable self-registration so users can sign up and create servers:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/plugin-client.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/plugin-client.sh | bash
 ```
 
 **Default limits set per user:**
@@ -468,7 +468,7 @@ curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/plugin-cli
 If anything stops working, restart everything:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/restart.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/restart.sh | bash
 ```
 
 Or manually:
@@ -637,7 +637,7 @@ sudo dpkg --configure -a
 ### Run any script directly:
 ```bash
 # Replace SCRIPT_NAME with the script you want
-curl -fsSL https://raw.githubusercontent.com/Adexx-11234/newrepo/main/SCRIPT_NAME.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/SCRIPT_NAME.sh | bash
 ```
 
 ---
@@ -712,4 +712,4 @@ If everything is set up correctly:
 ---
 
 **Made with ❤️ by NexusTechPro**  
-[github.com/Adexx-11234/newrepo](https://github.com/Adexx-11234/newrepo)
+[github.com/nexustechpro2/VM-in-Google-Idx](https://github.com/nexustechpro2/VM-in-Google-Idx)
