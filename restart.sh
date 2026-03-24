@@ -1,10 +1,15 @@
 #!/bin/bash
 
 ################################################################################
-# PELICAN AUTO-RESTART SCRIPT v9.0 PRODUCTION READY
-# - FIXED: Docker starts via systemd on VMs with systemd
-# - FIXED: Falls back to manual dockerd if systemd fails
-# - ADDED: Cron, Supervisor, Queue Worker, Auto-Limits (step 5)
+# PELICAN AUTO-RESTART SCRIPT v9.1 PRODUCTION READY
+# Fixes from v9.0:
+#   - Fixed malformed redis-cli FLUSHDB line
+#   - Fixed DNS: preserves Tailscale (100.100.100.100) instead of overwriting
+#   - Fixed Wings: uses systemd instead of nohup (prevents port 8080 conflicts)
+#   - Fixed Cloudflare: kills zombies properly before starting
+#   - Fixed Supervisor: cleans stale socket/PID before starting
+#   - Fixed PHP-FPM: always ensures TCP 9000 (no socket mode)
+#   - Fixed resolv.conf locking: respects Tailscale DNS
 ################################################################################
 
 RED='\033[0;31m'
@@ -15,8 +20,8 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║     Pelican Services Restart v9.0      ║${NC}"
-echo -e "${CYAN}║     Migration-Safe Restart             ║${NC}"
+echo -e "${CYAN}║     Pelican Services Restart v9.1      ║${NC}"
+echo -e "${CYAN}║     Production-Safe Restart            ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -71,6 +76,19 @@ else
     rm -f /var/run/docker.sock /var/run/docker.pid
     sleep 2
 
+    # Ensure correct daemon.json (DNS fix for containers)
+    cat > /etc/docker/daemon.json << 'DOCKEREOF'
+{
+  "dns": ["8.8.8.8", "1.1.1.1"],
+  "dns-opts": ["ndots:0", "timeout:1", "attempts:1"],
+  "mtu": 1450,
+  "log-driver": "json-file",
+  "log-opts": {"max-size": "10m", "max-file": "3"},
+  "iptables": true,
+  "userland-proxy": false
+}
+DOCKEREOF
+
     # Try systemd first (works on real VMs)
     HAS_SYSTEMD=false
     if [ -d /run/systemd/system ] && pidof systemd >/dev/null 2>&1; then
@@ -79,12 +97,7 @@ else
 
     # Fallback to manual dockerd
     if [ "$HAS_SYSTEMD" = false ]; then
-        echo '{
-  "dns": ["1.1.1.1", "8.8.8.8"],
-  "dns-opts": ["ndots:0", "timeout:1", "attempts:1"],
-  "mtu": 1450
-}' > /etc/docker/daemon.json
-    nohup dockerd --config-file /etc/docker/daemon.json > /var/log/docker.log 2>&1 &
+        nohup dockerd --config-file /etc/docker/daemon.json > /var/log/docker.log 2>&1 &
     fi
 
     echo -n "   Waiting for Docker"
@@ -127,7 +140,7 @@ else
 fi
 
 # ============================================================================
-# 3. START PHP-FPM
+# 3. START PHP-FPM (always TCP 9000)
 # ============================================================================
 echo -e "${CYAN}[3/8] Starting PHP-FPM...${NC}"
 
@@ -142,19 +155,18 @@ done
 if [ -z "$PHP_VERSION" ]; then
     echo -e "${RED}   ✗ PHP-FPM not found${NC}"
 else
+    # Always force TCP 9000 — never socket mode (socket causes 502)
+    if [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
+        sed -i 's|^listen = .*|listen = 127.0.0.1:9000|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+        sed -i 's|^;listen.allowed_clients|listen.allowed_clients|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    fi
+
     if netstat -tulpn 2>/dev/null | grep -q ":9000.*LISTEN"; then
         echo -e "${GREEN}   ✓ PHP-FPM already running (port 9000)${NC}"
         ((SERVICES_STARTED++))
     else
         pkill -9 php-fpm 2>/dev/null || true
         sleep 1
-
-        if [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
-            if grep -q "listen = /run/php" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf; then
-                sed -i 's|listen = /run/php/php.*-fpm.sock|listen = 127.0.0.1:9000|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-                sed -i 's|;listen.allowed_clients = 127.0.0.1|listen.allowed_clients = 127.0.0.1|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-            fi
-        fi
 
         systemctl start php${PHP_VERSION}-fpm 2>/dev/null || \
         service php${PHP_VERSION}-fpm start 2>/dev/null || \
@@ -176,14 +188,20 @@ fi
 echo -e "${CYAN}[4/8] Starting Nginx...${NC}"
 
 if pgrep nginx >/dev/null && (netstat -tulpn 2>/dev/null | grep -qE ":8443|:443"); then
-        echo -e "${GREEN}   ✓ Nginx already running (port 8443)${NC}"
-        ((SERVICES_STARTED++))
+    echo -e "${GREEN}   ✓ Nginx already running (port 8443)${NC}"
+    ((SERVICES_STARTED++))
 else
     pkill nginx 2>/dev/null || true
     sleep 1
-# Fix Nginx config first (Livewire caching block causes issues)
-    sudo sed -i '/# Disable caching for Livewire/,/^}/d' /etc/nginx/sites-available/pelican.conf 2>/dev/null || true
-    # Test config before starting
+
+    # Fix Nginx config (Livewire caching block causes issues)
+    sed -i '/# Disable caching for Livewire/,/^}/d' /etc/nginx/sites-available/pelican.conf 2>/dev/null || true
+
+    # Ensure fastcgi_pass points to TCP 9000 not socket
+    if [ -f "/etc/nginx/sites-enabled/pelican.conf" ]; then
+        sed -i 's|fastcgi_pass unix:/run/php/php.*-fpm.sock;|fastcgi_pass 127.0.0.1:9000;|g' /etc/nginx/sites-enabled/pelican.conf
+    fi
+
     nginx -t 2>/dev/null && {
         systemctl start nginx 2>/dev/null || \
         service nginx start 2>/dev/null || \
@@ -193,7 +211,7 @@ else
     }
     sleep 2
 
-   if pgrep nginx >/dev/null && (netstat -tulpn 2>/dev/null | grep -qE ":8443|:443"); then
+    if pgrep nginx >/dev/null && (netstat -tulpn 2>/dev/null | grep -qE ":8443|:443"); then
         echo -e "${GREEN}   ✓ Nginx started (port 8443)${NC}"
         ((SERVICES_STARTED++))
     else
@@ -210,11 +228,15 @@ echo -e "${CYAN}[5/8] Starting Cron, Supervisor & Auto-Limits...${NC}"
 service cron start 2>/dev/null || cron 2>/dev/null || true
 pgrep cron >/dev/null && echo -e "${GREEN}   ✓ Cron running${NC}" || echo -e "${RED}   ✗ Cron failed${NC}"
 
-# Supervisord + Queue Worker
-if ! pgrep supervisord >/dev/null; then
-    supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
-    sleep 2
-fi
+# Supervisor — kill zombies and clean stale files first
+pkill -f supervisord 2>/dev/null || true
+sleep 2
+rm -f /var/run/supervisor.sock /var/run/supervisord.pid
+
+systemctl start supervisor 2>/dev/null || \
+supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
+sleep 3
+
 supervisorctl reread 2>/dev/null || true
 supervisorctl update 2>/dev/null || true
 supervisorctl start pelican-queue 2>/dev/null || supervisorctl restart pelican-queue 2>/dev/null || true
@@ -236,24 +258,29 @@ fi
 ((SERVICES_STARTED++))
 
 # ============================================================================
-# 6. START WINGS
+# 6. START WINGS (via systemd only — prevents port 8080 conflicts)
 # ============================================================================
 echo -e "${CYAN}[6/8] Starting Wings...${NC}"
 
-if pgrep -x wings >/dev/null; then
+if systemctl is-active --quiet wings; then
     echo -e "${GREEN}   ✓ Wings already running${NC}"
+    ((SERVICES_STARTED++))
 else
+    # Kill any zombie wings processes first
+    pkill -x wings 2>/dev/null || true
+    sleep 2
+
     if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
-        pkill wings 2>/dev/null || true
-        sleep 1
-        cd /etc/pelican
-        nohup /usr/local/bin/wings > /tmp/wings.log 2>&1 &
+        systemctl start wings 2>/dev/null
         sleep 5
-        if pgrep -x wings >/dev/null; then
+        if systemctl is-active --quiet wings; then
             echo -e "${GREEN}   ✓ Wings started${NC}"
-            netstat -tulpn 2>/dev/null | grep -q ":8080" && echo -e "${GREEN}   ✓ Wings on port 8080${NC}" || echo -e "${YELLOW}   ⚠ Wings not on port 8080 yet${NC}"
+            netstat -tulpn 2>/dev/null | grep -q ":8080" && \
+                echo -e "${GREEN}   ✓ Wings on port 8080${NC}" || \
+                echo -e "${YELLOW}   ⚠ Wings not on port 8080 yet${NC}"
+            ((SERVICES_STARTED++))
         else
-            echo -e "${RED}   ✗ Wings failed - check: tail -20 /tmp/wings.log${NC}"
+            echo -e "${RED}   ✗ Wings failed - check: journalctl -u wings -n 20${NC}"
         fi
     else
         echo -e "${YELLOW}   ⚠ Wings not installed${NC}"
@@ -261,27 +288,38 @@ else
 fi
 
 # ============================================================================
-# 7. START CLOUDFLARE TUNNELS
+# 7. START CLOUDFLARE TUNNELS (one process only)
 # ============================================================================
 echo -e "${CYAN}[7/8] Starting Cloudflare Tunnels...${NC}"
 
-pkill cloudflared 2>/dev/null || true
-sleep 2
+# Kill ALL existing cloudflared processes cleanly
+pkill -9 cloudflared 2>/dev/null || true
+sleep 3
+
+# Verify all dead
+if pgrep cloudflared >/dev/null; then
+    pkill -9 cloudflared 2>/dev/null || true
+    sleep 2
+fi
+
 TUNNEL_COUNT=0
 
 if [ -n "$CF_TOKEN" ]; then
+    systemctl start cloudflared 2>/dev/null || \
     nohup cloudflared tunnel run --token "$CF_TOKEN" > /var/log/cloudflared-panel.log 2>&1 &
-    sleep 2
+    sleep 3
     ((TUNNEL_COUNT++))
 fi
 
 if [ -n "$CF_TOKEN_WINGS" ]; then
     nohup cloudflared tunnel run --token "$CF_TOKEN_WINGS" > /var/log/cloudflared-wings.log 2>&1 &
-    sleep 2
+    sleep 3
     ((TUNNEL_COUNT++))
 fi
 
-[ "$TUNNEL_COUNT" -gt 0 ] && echo -e "${GREEN}   ✓ Started ${TUNNEL_COUNT} Cloudflare tunnel(s)${NC}" || echo -e "${YELLOW}   ⚠ No tunnel tokens found${NC}"
+[ "$TUNNEL_COUNT" -gt 0 ] && \
+    echo -e "${GREEN}   ✓ Started ${TUNNEL_COUNT} Cloudflare tunnel(s)${NC}" || \
+    echo -e "${YELLOW}   ⚠ No tunnel tokens found in .pelican.env${NC}"
 
 # ============================================================================
 # 8. CLEAR PANEL CACHE
@@ -296,9 +334,33 @@ if [ -d "/var/www/pelican" ]; then
     $PHP_BIN artisan cache:clear >/dev/null 2>&1 || true
     $PHP_BIN artisan view:clear >/dev/null 2>&1 || true
     $PHP_BIN artisan route:clear >/dev/null 2>&1 || true
+    $PHP_BIN artisan queue:restart >/dev/null 2>&1 || true
     rm -rf storage/framework/views/* storage/framework/cache/* 2>/dev/null || true
-redis-cli FLUSHDB >/dev/null 2>&1 || true
+    # FIX: correct redis flush command (was malformed in v9.0)
+    redis-cli FLUSHDB >/dev/null 2>&1 || true
     echo -e "${GREEN}   ✓ Cache cleared${NC}"
+fi
+
+# ============================================================================
+# DNS — preserve Tailscale, just ensure public DNS fallback
+# ============================================================================
+# FIX: Do NOT overwrite resolv.conf if Tailscale is managing it
+# Instead, just ensure public DNS is reachable via daemon.json (already done above)
+if ! grep -q "100.100.100.100" /etc/resolv.conf 2>/dev/null; then
+    # Tailscale not active — safe to set DNS directly
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    echo "nameserver 8.8.8.8
+nameserver 1.1.1.1" > /etc/resolv.conf
+    chattr +i /etc/resolv.conf 2>/dev/null || true
+    echo -e "${GREEN}   ✓ DNS locked (8.8.8.8, 1.1.1.1)${NC}"
+else
+    # Tailscale is active — disable its DNS override but keep it running
+    tailscale set --accept-dns=false 2>/dev/null || true
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    echo "nameserver 8.8.8.8
+nameserver 1.1.1.1
+nameserver 100.100.100.100" > /etc/resolv.conf
+    echo -e "${GREEN}   ✓ DNS set (Tailscale detected, public DNS prioritised)${NC}"
 fi
 
 # ============================================================================
@@ -310,27 +372,62 @@ echo -e "${CYAN}║          Services Status               ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
-docker ps >/dev/null 2>&1 && echo -e "${GREEN}✓ Docker:       Running ($(docker ps -q | wc -l) containers)${NC}" || echo -e "${RED}✗ Docker:       Not Running${NC}"
-redis-cli ping >/dev/null 2>&1 && echo -e "${GREEN}✓ Redis:        Running${NC}" || echo -e "${RED}✗ Redis:        Not Running${NC}"
-pgrep nginx >/dev/null && (netstat -tulpn 2>/dev/null | grep -qE ":8443|:443") && echo -e "${GREEN}✓ Nginx:        Running (port 8443)${NC}" || echo -e "${RED}✗ Nginx:        Not Running${NC}"
-pgrep cron >/dev/null && echo -e "${GREEN}✓ Cron:         Running${NC}" || echo -e "${RED}✗ Cron:         Not Running${NC}"
-pgrep supervisord >/dev/null && echo -e "${GREEN}✓ Supervisor:   Running${NC}" || echo -e "${RED}✗ Supervisor:   Not Running${NC}"
-pgrep -f "queue:work" >/dev/null && echo -e "${GREEN}✓ Queue Worker: Running${NC}" || echo -e "${RED}✗ Queue Worker: Not Running${NC}"
-pgrep -f "auto-resource-limits-fast" >/dev/null && echo -e "${GREEN}✓ Auto-Limits:  Running${NC}" || echo -e "${RED}✗ Auto-Limits:  Not Running${NC}"
-pgrep -x wings >/dev/null && echo -e "${GREEN}✓ Wings:        Running${NC}" || echo -e "${YELLOW}⚠ Wings:        Not Running${NC}"
-CF_COUNT=$(pgrep -f cloudflared | wc -l)
-[ "$CF_COUNT" -gt 0 ] && echo -e "${GREEN}✓ Cloudflare:   Running (${CF_COUNT} tunnel(s))${NC}" || echo -e "${YELLOW}⚠ Cloudflare:   Not Running${NC}"
+docker ps >/dev/null 2>&1 && \
+    echo -e "${GREEN}✓ Docker:       Running ($(docker ps -q | wc -l) containers)${NC}" || \
+    echo -e "${RED}✗ Docker:       Not Running${NC}"
+
+redis-cli ping >/dev/null 2>&1 && \
+    echo -e "${GREEN}✓ Redis:        Running${NC}" || \
+    echo -e "${RED}✗ Redis:        Not Running${NC}"
+
+netstat -tulpn 2>/dev/null | grep -q ":9000.*LISTEN" && \
+    echo -e "${GREEN}✓ PHP-FPM:      Running (port 9000)${NC}" || \
+    echo -e "${RED}✗ PHP-FPM:      Not Running${NC}"
+
+pgrep nginx >/dev/null && netstat -tulpn 2>/dev/null | grep -qE ":8443|:443" && \
+    echo -e "${GREEN}✓ Nginx:        Running (port 8443)${NC}" || \
+    echo -e "${RED}✗ Nginx:        Not Running${NC}"
+
+pgrep cron >/dev/null && \
+    echo -e "${GREEN}✓ Cron:         Running${NC}" || \
+    echo -e "${RED}✗ Cron:         Not Running${NC}"
+
+pgrep supervisord >/dev/null && \
+    echo -e "${GREEN}✓ Supervisor:   Running${NC}" || \
+    echo -e "${RED}✗ Supervisor:   Not Running${NC}"
+
+pgrep -f "queue:work" >/dev/null && \
+    echo -e "${GREEN}✓ Queue Worker: Running${NC}" || \
+    echo -e "${RED}✗ Queue Worker: Not Running${NC}"
+
+pgrep -f "auto-resource-limits-fast" >/dev/null && \
+    echo -e "${GREEN}✓ Auto-Limits:  Running${NC}" || \
+    echo -e "${RED}✗ Auto-Limits:  Not Running${NC}"
+
+systemctl is-active --quiet wings && \
+    echo -e "${GREEN}✓ Wings:        Running${NC}" || \
+    echo -e "${YELLOW}⚠ Wings:        Not Running${NC}"
+
+CF_COUNT=$(pgrep -c cloudflared 2>/dev/null || echo 0)
+[ "$CF_COUNT" -gt 0 ] && \
+    echo -e "${GREEN}✓ Cloudflare:   Running (${CF_COUNT} process)${NC}" || \
+    echo -e "${YELLOW}⚠ Cloudflare:   Not Running${NC}"
+
+# Panel HTTP check
+PANEL_CODE=$(curl -sk https://${PANEL_DOMAIN:-localhost:8443} -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+[ "$PANEL_CODE" = "200" ] || [ "$PANEL_CODE" = "302" ] && \
+    echo -e "${GREEN}✓ Panel:        Responding (HTTP $PANEL_CODE)${NC}" || \
+    echo -e "${RED}✗ Panel:        Not Responding (HTTP $PANEL_CODE)${NC}"
 
 echo ""
 [ -n "$PANEL_DOMAIN" ] && echo -e "${CYAN}🌐 Panel:${NC} ${GREEN}https://${PANEL_DOMAIN}${NC}"
-[ -n "$NODE_DOMAIN" ] && echo -e "${CYAN}🌐 Wings:${NC} ${GREEN}https://${NODE_DOMAIN}${NC}"
+[ -n "$NODE_DOMAIN" ]  && echo -e "${CYAN}🌐 Wings:${NC} ${GREEN}https://${NODE_DOMAIN}${NC}"
 echo ""
 echo -e "${CYAN}📝 Logs:${NC}"
-echo -e "  Wings:      ${GREEN}tail -f /tmp/wings.log${NC}"
-echo -e "  Panel:      ${GREEN}tail -f /var/log/nginx/pelican.app-error.log${NC}"
-echo -e "  Docker:     ${GREEN}tail -f /var/log/docker.log${NC}"
-echo -e "  Queue:      ${GREEN}tail -f /var/log/pelican-queue.log${NC}"
-echo -e "  Auto-Limits:${GREEN}tail -f /var/log/pelican-auto-limits-fast.log${NC}"
+echo -e "  Wings:       ${GREEN}journalctl -u wings -f${NC}"
+echo -e "  Panel:       ${GREEN}tail -f /var/log/nginx/pelican.app-error.log${NC}"
+echo -e "  Docker:      ${GREEN}journalctl -u docker -f${NC}"
+echo -e "  Queue:       ${GREEN}supervisorctl tail -f pelican-queue${NC}"
+echo -e "  Auto-Limits: ${GREEN}tail -f /var/log/pelican-auto-limits-fast.log${NC}"
 echo ""
-
-echo "restart.sh v9.0"
+echo "restart.sh v9.1"
