@@ -170,19 +170,18 @@ fi
 echo -e "${GREEN}   ✓ Docker installed: $(docker --version 2>/dev/null | cut -d' ' -f3 | tr -d ',')${NC}"
 
 # ============================================================================
-# CONFIGURE AND START DOCKER - KEY FIX: Never kill running Docker!
+# CONFIGURE AND START DOCKER
 # ============================================================================
 echo -e "${CYAN}[7/20] Starting Docker daemon...${NC}"
 
 mkdir -p /etc/docker
 
-# Write daemon config based on environment
 if [ "$IS_CONTAINER" = true ]; then
     cat > /etc/docker/daemon.json <<'DEOF'
 {
-  "dns": ["8.8.8.8", "1.1.1.1", "8.8.4.4"],
-  "dns-opts": ["ndots:0", "timeout:1", "attempts:1"],
-  "mtu": 1450
+  "dns": ["1.1.1.1", "8.8.8.8", "1.0.0.1", "8.8.4.4"],
+  "dns-opts": ["ndots:1", "timeout:2", "attempts:3"],
+  "mtu": 1400,
   "iptables": false,
   "ip6tables": false,
   "ipv6": false,
@@ -190,19 +189,30 @@ if [ "$IS_CONTAINER" = true ]; then
   "default-address-pools": [{"base": "172.25.0.0/16", "size": 24}],
   "bip": "172.26.0.1/16",
   "log-driver": "json-file",
-  "log-opts": {"max-size": "10m", "max-file": "3"}
+  "log-opts": {"max-size": "10m", "max-file": "3"},
+  "live-restore": true
 }
 DEOF
 else
     cat > /etc/docker/daemon.json <<'DEOF'
 {
-  "dns": ["8.8.8.8", "1.1.1.1", "8.8.4.4"],
-  "dns-opts": ["ndots:0", "timeout:1", "attempts:1"],
-  "mtu": 1450
+  "dns": ["1.1.1.1", "8.8.8.8", "1.0.0.1", "8.8.4.4"],
+  "dns-opts": ["ndots:1", "timeout:2", "attempts:3"],
+  "mtu": 1400,
   "log-driver": "json-file",
-  "log-opts": {"max-size": "10m", "max-file": "3"}
+  "log-opts": {"max-size": "10m", "max-file": "3"},
+  "live-restore": true
 }
 DEOF
+fi
+
+# TCP MSS clamping — fixes slow/broken downloads when ICMP is blocked
+iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+# Persist iptables rule across reboots
+if [ "$HAS_SYSTEMD" = true ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent 2>/dev/null || true
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
 fi
 
 # KEY FIX: Check if Docker is already running BEFORE doing anything

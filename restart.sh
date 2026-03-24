@@ -77,15 +77,15 @@ else
     sleep 2
 
     # Ensure correct daemon.json (DNS fix for containers)
-    cat > /etc/docker/daemon.json << 'DOCKEREOF'
+# In [1/8] Docker section, replace the daemon.json block:
+    cat > /etc/docker/daemon.json <<'DOCKEREOF'
 {
-  "dns": ["8.8.8.8", "1.1.1.1"],
-  "dns-opts": ["ndots:0", "timeout:1", "attempts:1"],
-  "mtu": 1450,
+  "dns": ["1.1.1.1", "8.8.8.8", "1.0.0.1", "8.8.4.4"],
+  "dns-opts": ["ndots:1", "timeout:2", "attempts:3"],
+  "mtu": 1400,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
-  "iptables": true,
-  "userland-proxy": false
+  "live-restore": true
 }
 DOCKEREOF
 
@@ -144,8 +144,9 @@ fi
 # ============================================================================
 echo -e "${CYAN}[3/8] Starting PHP-FPM...${NC}"
 
+# In [3/8] PHP-FPM section, replace the static version loop:
 PHP_VERSION=""
-for ver in 8.3 8.4 8.2 8.1; do
+for ver in 8.5 8.4 8.3 8.2 8.1; do
     if [ -f "/usr/sbin/php-fpm${ver}" ] || command -v php${ver} &>/dev/null; then
         PHP_VERSION=$ver
         break
@@ -324,12 +325,14 @@ fi
 # ============================================================================
 # 8. CLEAR PANEL CACHE
 # ============================================================================
-echo -e "${CYAN}[8/8] Clearing Panel cache...${NC}"
+echo -e "${CYAN}[8/8] Clearing Panel cache...${ NC}"
 
 if [ -d "/var/www/pelican" ]; then
     cd /var/www/pelican
-    PHP_BIN="/usr/bin/php${PHP_VERSION:-8.3}"
+    # In [8/8] cache clear, use the detected PHP_VERSION
+    PHP_BIN="/usr/bin/php${PHP_VERSION}"
     [ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php)
+# Replace this line in [8/8]:
     $PHP_BIN artisan config:clear >/dev/null 2>&1 || true
     $PHP_BIN artisan cache:clear >/dev/null 2>&1 || true
     $PHP_BIN artisan view:clear >/dev/null 2>&1 || true
@@ -339,28 +342,6 @@ if [ -d "/var/www/pelican" ]; then
     # FIX: correct redis flush command (was malformed in v9.0)
     redis-cli FLUSHDB >/dev/null 2>&1 || true
     echo -e "${GREEN}   ✓ Cache cleared${NC}"
-fi
-
-# ============================================================================
-# DNS — preserve Tailscale, just ensure public DNS fallback
-# ============================================================================
-# FIX: Do NOT overwrite resolv.conf if Tailscale is managing it
-# Instead, just ensure public DNS is reachable via daemon.json (already done above)
-if ! grep -q "100.100.100.100" /etc/resolv.conf 2>/dev/null; then
-    # Tailscale not active — safe to set DNS directly
-    chattr -i /etc/resolv.conf 2>/dev/null || true
-    echo "nameserver 8.8.8.8
-nameserver 1.1.1.1" > /etc/resolv.conf
-    chattr +i /etc/resolv.conf 2>/dev/null || true
-    echo -e "${GREEN}   ✓ DNS locked (8.8.8.8, 1.1.1.1)${NC}"
-else
-    # Tailscale is active — disable its DNS override but keep it running
-    tailscale set --accept-dns=false 2>/dev/null || true
-    chattr -i /etc/resolv.conf 2>/dev/null || true
-    echo "nameserver 8.8.8.8
-nameserver 1.1.1.1
-nameserver 100.100.100.100" > /etc/resolv.conf
-    echo -e "${GREEN}   ✓ DNS set (Tailscale detected, public DNS prioritised)${NC}"
 fi
 
 # ============================================================================

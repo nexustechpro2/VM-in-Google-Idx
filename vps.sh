@@ -1101,12 +1101,12 @@ write_files:
   - path: /etc/docker/daemon.json
     content: |
       {
-        "dns": ["8.8.8.8", "1.1.1.1"],
-        "dns-opts": ["ndots:0"],
-        "log-driver": "json-file",
-        "log-opts": {"max-size": "10m", "max-file": "3"},
-        "iptables": true,
-        "userland-proxy": false
+  "dns": ["1.1.1.1", "8.8.8.8", "1.0.0.1", "8.8.4.4"],
+  "dns-opts": ["ndots:1", "timeout:2", "attempts:3"],
+  "mtu": 1400,
+  "log-driver": "json-file",
+  "log-opts": {"max-size": "10m", "max-file": "3"},
+  "live-restore": true
       }
     permissions: '0644'
   - path: /etc/sysctl.d/99-vm-tweaks.conf
