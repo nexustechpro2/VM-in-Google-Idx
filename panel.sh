@@ -373,9 +373,6 @@ else
     echo -e "${GREEN}   ✓ Dependencies already installed${NC}"
 fi
 
-# Fix EditFiles.php Filament compatibility bug
-sed -i 's/public static function getUrl(array \$parameters = \[\], bool \$isAbsolute = true, ?string \$panel = null, ?Model \$tenant = null, bool \$shouldGuessMissingParameters = false): string/public static function getUrl(array $parameters = [], bool $isAbsolute = true, ?string $panel = null, ?Model $tenant = null, bool $shouldGuessMissingParameters = false, ?string $configuration = null): string/' /var/www/pelican/app/Filament/Server/Resources/Files/Pages/EditFiles.php
-
 # ============================================================================
 # CONFIGURE ENVIRONMENT (CRITICAL: PRESERVE APP_KEY!)
 # ============================================================================
@@ -449,7 +446,7 @@ ENVEOF
 if [ "$DB_DRIVER" = "pgsql" ]; then
     cat >> .env <<PGEOF
 # PostgreSQL Optimizations
-DB_SSLMODE=prefer
+DB_SSLMODE=require
 DB_SCHEMA=public
 PGEOF
 fi
@@ -631,7 +628,10 @@ DB_PASS_VAL=$(grep '^DB_PASS=' "$ENV_FILE" | cut -d'"' -f2)
 
 DB_HAS_DATA=false
 if [ "$DB_DRIVER" = "pgsql" ]; then
-    TABLE_COUNT=$(PGPASSWORD="$DB_PASS_VAL" psql -h "$DB_HOST_VAL" -p "$DB_PORT_VAL" -U "$DB_USER_VAL" -d "$DB_NAME_VAL" -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';" 2>/dev/null || echo "0")
+    TABLE_COUNT=$(PGPASSWORD="$DB_PASS_VAL" psql \
+    "sslmode=require host=$DB_HOST_VAL port=$DB_PORT_VAL dbname=$DB_NAME_VAL user=$DB_USER_VAL password=$DB_PASS_VAL" \
+    -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';" \
+    2>/dev/null || echo "0")
 else
     TABLE_COUNT=$(mysql -h "$DB_HOST_VAL" -P "$DB_PORT_VAL" -u "$DB_USER_VAL" -p"$DB_PASS_VAL" "$DB_NAME_VAL" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME_VAL';" 2>/dev/null || echo "0")
 fi
