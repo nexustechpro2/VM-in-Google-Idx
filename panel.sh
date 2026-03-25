@@ -353,7 +353,7 @@ cd /var/www/pelican
 # ============================================================================
 echo -e "${CYAN}[9/20] Installing dependencies...${NC}"
 
-PHP_BIN="/usr/bin/php8.3"
+PHP_BIN="/usr/bin/php${PHP_VERSION:-8.5}"
 [ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php)
 
 if [ ! -d "vendor" ] || [ ! -f "vendor/autoload.php" ]; then
@@ -448,9 +448,7 @@ ENVEOF
 if [ "$DB_DRIVER" = "pgsql" ]; then
     cat >> .env <<PGEOF
 # PostgreSQL Optimizations
-DB_SSLMODE=require
-DB_OPTIONS="--search_path=public"
-PGBOUNCER_MODE=session
+DB_SSLMODE=prefer
 DB_SCHEMA=public
 PGEOF
 fi
@@ -524,10 +522,20 @@ server {
     server_name _;
     ssl_certificate /etc/ssl/pelican/cert.pem;
     ssl_certificate_key /etc/ssl/pelican/key.pem;
+
+    # --- SSL Hardening ---
     ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256;
+    ssl_prefer_server_ciphers off;
     ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # --- OCSP Stapling ---
+    ssl_stapling on;
+    ssl_stapling_verify on;
+    resolver 1.1.1.1 8.8.8.8 valid=300s;
+    resolver_timeout 5s;
 
     root /var/www/pelican/public;
     index index.php;
@@ -557,12 +565,15 @@ server {
         access_log off;
     }
 
+    # --- Security Headers ---
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
     add_header X-Content-Type-Options nosniff;
     add_header X-XSS-Protection "1; mode=block";
     add_header X-Robots-Tag none;
     add_header Content-Security-Policy "frame-ancestors 'self'";
     add_header X-Frame-Options DENY;
     add_header Referrer-Policy same-origin;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
 
     location / {
         try_files $uri $uri/ /index.php?$query_string;
@@ -688,7 +699,7 @@ else
 fi
 
 EXISTING_CRON=$(crontab -l -u www-data 2>/dev/null | grep -v "artisan schedule:run" || true)
-NEW_CRON="${EXISTING_CRON}"$'\n'"* * * * * /usr/bin/php8.3 /var/www/pelican/artisan schedule:run >> /dev/null 2>&1"
+NEW_CRON="${EXISTING_CRON}"$'\n'"* * * * * /usr/bin/php${PHP_VERSION} /var/www/pelican/artisan schedule:run >> /dev/null 2>&1"
 echo "$NEW_CRON" | crontab -u www-data - 2>/dev/null || true
 
 echo -e "${GREEN}   ✓ Cron configured${NC}"
@@ -798,6 +809,16 @@ mkdir -p storage/app/public/icons/egg
 chown -R www-data:www-data storage/app/public
 
 $PHP_BIN artisan storage:link 2>/dev/null || true
+
+# Fix Livewire 404 assets
+$PHP_BIN artisan livewire:publish --assets 2>/dev/null || true
+
+# Ensure livewire symlink exists
+if [ ! -d "/var/www/pelican/public/livewire" ]; then
+    ln -sf /var/www/pelican/vendor/livewire/livewire/dist /var/www/pelican/public/livewire
+fi
+chown -R www-data:www-data /var/www/pelican/public/livewire 2>/dev/null || true
+echo -e "${GREEN}   ✓ Livewire assets published${NC}"
 
 cd storage/app/public/icons/egg
 git clone --depth 1 https://github.com/pelican-eggs/eggs.git /tmp/pelican-eggs 2>/dev/null || true
