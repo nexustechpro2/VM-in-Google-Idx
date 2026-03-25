@@ -332,6 +332,9 @@ if ! command -v composer &> /dev/null; then
 fi
 echo -e "${GREEN}   ✓ Composer $(composer --version 2>/dev/null | cut -d' ' -f3)${NC}"
 
+sed -i 's/bool \$shouldGuessMissingParameters = false): string/bool $shouldGuessMissingParameters = false, ?string $configuration = null): string/' /var/www/pelican/app/Filament/Server/Resources/Files/Pages/EditFiles.php
+echo -e "${GREEN}   ✓ EditFiles.php patched${NC}"
+
 # ============================================================================
 # DOWNLOAD PANEL
 # ============================================================================
