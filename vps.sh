@@ -294,13 +294,19 @@ if command -v docker &>/dev/null; then
     sudo mkdir -p /etc/docker
     sudo tee /etc/docker/daemon.json > /dev/null <<'DF'
 {
-  "dns": ["8.8.8.8","1.1.1.1"],
-  "dns-opts": ["ndots:0", "timeout:1", "attempts:1"],
-  "mtu": 1450,
+  "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4"],
+  "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
+  "mtu": 1280,
   "log-driver": "json-file",
-  "log-opts": {"max-size":"10m","max-file":"3"},
+  "log-opts": {"max-size": "10m", "max-file": "3"},
+  "live-restore": true,
   "iptables": true,
-  "userland-proxy": false
+  "ip-forward": true,
+  "ip-masq": true,
+  "storage-driver": "overlay2",
+  "default-ulimits": {
+    "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
+  }
 }
 DF
     sudo systemctl restart docker || true
@@ -1101,12 +1107,19 @@ write_files:
   - path: /etc/docker/daemon.json
     content: |
       {
-  "dns": ["1.1.1.1", "8.8.8.8", "1.0.0.1", "8.8.4.4"],
-  "dns-opts": ["ndots:1", "timeout:2", "attempts:3"],
-  "mtu": 1400,
-  "log-driver": "json-file",
-  "log-opts": {"max-size": "10m", "max-file": "3"},
-  "live-restore": true
+        "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4"],
+        "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
+        "mtu": 1280,
+        "log-driver": "json-file",
+        "log-opts": {"max-size": "10m", "max-file": "3"},
+        "live-restore": true,
+        "iptables": true,
+        "ip-forward": true,
+        "ip-masq": true,
+        "storage-driver": "overlay2",
+        "default-ulimits": {
+          "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
+        }
       }
     permissions: '0644'
   - path: /etc/sysctl.d/99-vm-tweaks.conf

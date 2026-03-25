@@ -422,10 +422,14 @@ REDIS_HOST=${REDIS_HOST_VAL}
 REDIS_PORT=${REDIS_PORT_VAL}
 REDIS_PASSWORD=${REDIS_PASS_VAL}
 # Cache & Session
+# Cache & Session
 CACHE_DRIVER=redis
 CACHE_STORE=redis
 SESSION_DRIVER=redis
 QUEUE_CONNECTION=redis
+SESSION_LIFETIME=120
+SESSION_ENCRYPT=false
+REDIS_CLIENT=phpredis
 # Mail Configuration
 MAIL_MAILER=smtp
 MAIL_HOST=${MAIL_HOST}
@@ -445,7 +449,9 @@ ENVEOF
 if [ "$DB_DRIVER" = "pgsql" ]; then
     cat >> .env <<PGEOF
 # PostgreSQL Optimizations
-DB_SSLMODE=prefer
+DB_SSLMODE=require
+DB_OPTIONS="--search_path=public"
+PGBOUNCER_MODE=session
 DB_SCHEMA=public
 PGEOF
 fi
@@ -477,11 +483,16 @@ echo -e "${CYAN}[12/20] Configuring PHP-FPM...${NC}"
 if [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
     sed -i 's|listen = /run/php/php.*-fpm.sock|listen = 127.0.0.1:9000|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
     sed -i 's|;listen.allowed_clients = 127.0.0.1|listen.allowed_clients = 127.0.0.1|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-    # Reduce workers to save RAM
-    sed -i 's/^pm.max_children.*/pm.max_children = 20/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-    sed -i 's/^pm.start_servers.*/pm.start_servers = 5/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-    sed -i 's/^pm.min_spare_servers.*/pm.min_spare_servers = 3/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-    sed -i 's/^pm.max_spare_servers.*/pm.max_spare_servers = 10/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    # Dynamic pool — balanced for a VM with 2-4 GB RAM
+    sed -i 's/^pm =.*/pm = dynamic/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^pm.max_children.*/pm.max_children = 30/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^pm.start_servers.*/pm.start_servers = 8/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^pm.min_spare_servers.*/pm.min_spare_servers = 5/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^pm.max_spare_servers.*/pm.max_spare_servers = 15/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    sed -i 's/^;pm.max_requests.*/pm.max_requests = 500/' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+    # Keep environment for OPcache preload
+    grep -q "^clear_env" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf || \
+        echo "clear_env = no" >> /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
 fi
 
 if [ "$HAS_SYSTEMD" = true ]; then
@@ -514,6 +525,11 @@ server {
     server_name _;
     ssl_certificate /etc/ssl/pelican/cert.pem;
     ssl_certificate_key /etc/ssl/pelican/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
     root /var/www/pelican/public;
     index index.php;
     access_log /var/log/nginx/pelican.app-access.log;
@@ -521,24 +537,38 @@ server {
     client_max_body_size 100m;
     client_body_timeout 120s;
     sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    keepalive_requests 100;
 
     gzip on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript;
-    gzip_min_length 1000;
+    gzip_comp_level 5;
+    gzip_min_length 256;
+    gzip_proxied any;
+    gzip_vary on;
+    gzip_types
+        text/plain text/css application/json application/javascript
+        text/xml application/xml text/javascript application/x-font-ttf
+        font/opentype image/svg+xml image/x-icon;
 
-    location ~* \.(jpg|jpeg|png|gif|ico|css|js|woff|woff2|ttf|svg)$ {
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|woff|woff2|ttf|svg|webp)$ {
         expires 30d;
-        add_header Cache-Control "public, no-transform";
+        add_header Cache-Control "public, no-transform, immutable";
+        access_log off;
     }
+
     add_header X-Content-Type-Options nosniff;
     add_header X-XSS-Protection "1; mode=block";
     add_header X-Robots-Tag none;
     add_header Content-Security-Policy "frame-ancestors 'self'";
     add_header X-Frame-Options DENY;
     add_header Referrer-Policy same-origin;
+
     location / {
         try_files $uri $uri/ /index.php?$query_string;
     }
+
     location ~ \.php$ {
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
         fastcgi_pass 127.0.0.1:9000;
@@ -548,12 +578,15 @@ server {
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_param HTTP_PROXY "";
         fastcgi_intercept_errors off;
-        fastcgi_buffer_size 16k;
-        fastcgi_buffers 4 16k;
-        fastcgi_connect_timeout 300;
+        fastcgi_buffer_size 32k;
+        fastcgi_buffers 8 32k;
+        fastcgi_busy_buffers_size 64k;
+        fastcgi_connect_timeout 60;
         fastcgi_send_timeout 300;
         fastcgi_read_timeout 300;
+        fastcgi_keep_conn on;
     }
+
     location ~ /\.ht {
         deny all;
     }
@@ -731,15 +764,22 @@ echo "nameserver 1.1.1.1
 nameserver 8.8.8.8" > /etc/resolv.conf
 
 # Enable OPcache
-echo "zend_extension=opcache.so
+cat > /etc/php/${PHP_VERSION}/mods-available/opcache.ini <<OPCEOF
+zend_extension=opcache.so
 opcache.enable=1
-opcache.enable_cli=1
+opcache.enable_cli=0
 opcache.memory_consumption=256
-opcache.interned_strings_buffer=16
-opcache.max_accelerated_files=10000
+opcache.interned_strings_buffer=32
+opcache.max_accelerated_files=30000
 opcache.revalidate_freq=0
 opcache.fast_shutdown=1
-opcache.validate_timestamps=0" > /etc/php/${PHP_VERSION}/mods-available/opcache.ini
+opcache.validate_timestamps=0
+opcache.save_comments=1
+opcache.huge_code_pages=0
+opcache.preload_user=www-data
+realpath_cache_size=4096K
+realpath_cache_ttl=600
+OPCEOF
 phpenmod -v ${PHP_VERSION} opcache
 systemctl restart php${PHP_VERSION}-fpm 2>/dev/null || true
 

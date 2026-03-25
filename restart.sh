@@ -77,15 +77,21 @@ else
     sleep 2
 
     # Ensure correct daemon.json (DNS fix for containers)
-# In [1/8] Docker section, replace the daemon.json block:
-    cat > /etc/docker/daemon.json <<'DOCKEREOF'
+cat > /etc/docker/daemon.json <<'DOCKEREOF'
 {
-  "dns": ["1.1.1.1", "8.8.8.8", "1.0.0.1", "8.8.4.4"],
-  "dns-opts": ["ndots:1", "timeout:2", "attempts:3"],
-  "mtu": 1400,
+  "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4"],
+  "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
+  "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
-  "live-restore": true
+  "live-restore": true,
+  "iptables": true,
+  "ip-forward": true,
+  "ip-masq": true,
+  "storage-driver": "overlay2",
+  "default-ulimits": {
+    "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
+  }
 }
 DOCKEREOF
 
@@ -342,6 +348,24 @@ if [ -d "/var/www/pelican" ]; then
     # FIX: correct redis flush command (was malformed in v9.0)
     redis-cli FLUSHDB >/dev/null 2>&1 || true
     echo -e "${GREEN}   ✓ Cache cleared${NC}"
+fi
+
+# ============================================================================
+# BONUS: REPAIR DOCKER NETWORKING IF BROKEN
+# ============================================================================
+echo -e "${CYAN}[BONUS] Checking Docker network health...${NC}"
+if docker info >/dev/null 2>&1; then
+    # Check if DOCKER-USER chain exists — if not, iptables rules were wiped
+    if ! iptables -L DOCKER-USER -n >/dev/null 2>&1; then
+        echo -e "${YELLOW}   ⚠ Docker iptables chains missing — restarting Docker...${NC}"
+        systemctl restart docker 2>/dev/null || true
+        sleep 5
+    fi
+    # Force re-add MSS clamping (fixes slow downloads in containers)
+    iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    # Ensure IP forwarding is ON
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    echo -e "${GREEN}   ✓ Docker network health OK${NC}"
 fi
 
 # ============================================================================

@@ -179,9 +179,9 @@ mkdir -p /etc/docker
 if [ "$IS_CONTAINER" = true ]; then
     cat > /etc/docker/daemon.json <<'DEOF'
 {
-  "dns": ["1.1.1.1", "8.8.8.8", "1.0.0.1", "8.8.4.4"],
-  "dns-opts": ["ndots:1", "timeout:2", "attempts:3"],
-  "mtu": 1400,
+  "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4", "1.0.0.1"],
+  "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
+  "mtu": 1280,
   "iptables": false,
   "ip6tables": false,
   "ipv6": false,
@@ -190,24 +190,69 @@ if [ "$IS_CONTAINER" = true ]; then
   "bip": "172.26.0.1/16",
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
-  "live-restore": true
+  "live-restore": true,
+  "storage-driver": "overlay2",
+  "default-ulimits": {
+    "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
+  }
 }
 DEOF
 else
     cat > /etc/docker/daemon.json <<'DEOF'
 {
-  "dns": ["1.1.1.1", "8.8.8.8", "1.0.0.1", "8.8.4.4"],
-  "dns-opts": ["ndots:1", "timeout:2", "attempts:3"],
-  "mtu": 1400,
+  "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4", "1.0.0.1"],
+  "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
+  "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
-  "live-restore": true
+  "live-restore": true,
+  "iptables": true,
+  "ip-forward": true,
+  "ip-masq": true,
+  "storage-driver": "overlay2",
+  "default-ulimits": {
+    "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
+  }
 }
 DEOF
 fi
 
 # TCP MSS clamping — fixes slow/broken downloads when ICMP is blocked
 iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+# Fix: keep Docker iptables rules alive — prevent network death after time
+cat > /etc/systemd/system/docker-iptables-repair.service <<'IPTEOF'
+[Unit]
+Description=Repair Docker iptables rules if network dies
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'iptables -C DOCKER-USER -j RETURN 2>/dev/null || systemctl restart docker'
+RemainAfterExit=no
+IPTEOF
+
+cat > /etc/systemd/system/docker-iptables-repair.timer <<'TIMEREOF'
+[Unit]
+Description=Check Docker iptables every 5 minutes
+Requires=docker-iptables-repair.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=docker-iptables-repair.service
+
+[Install]
+WantedBy=timers.target
+TIMEREOF
+
+if [ "$HAS_SYSTEMD" = true ]; then
+    systemctl daemon-reload
+    systemctl enable docker-iptables-repair.timer
+    systemctl start docker-iptables-repair.timer
+fi
+echo -e "${GREEN}   ✓ Docker iptables watchdog installed (checks every 5 min)${NC}"
 
 # Persist iptables rule across reboots
 if [ "$HAS_SYSTEMD" = true ]; then
