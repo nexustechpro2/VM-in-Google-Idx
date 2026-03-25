@@ -157,13 +157,14 @@ if [ ! -f "$ENV_FILE" ]; then
             echo "Example: postgresql://user:pass@host:port/database"
             read -p "PostgreSQL Connection String: " PG_CONN_STRING
 
-            if [[ $PG_CONN_STRING =~ postgresql://([^:]+):([^@]+)@([^:]+):([^/]+)/(.+) ]]; then
-                DB_USER="${BASH_REMATCH[1]}"
-                DB_PASS="${BASH_REMATCH[2]}"
-                DB_HOST="${BASH_REMATCH[3]}"
-                DB_PORT="${BASH_REMATCH[4]}"
-                DB_NAME="${BASH_REMATCH[5]}"
-                echo -e "${GREEN}   ✓ Parsed successfully${NC}"
+if [[ $PG_CONN_STRING =~ ^postgres(ql)?://(.+)@([^@:]+):([0-9]+)/([^?]+) ]]; then
+    USERPASS="${BASH_REMATCH[2]}"
+    DB_HOST="${BASH_REMATCH[3]}"
+    DB_PORT="${BASH_REMATCH[4]}"
+    DB_NAME="${BASH_REMATCH[5]}"
+    DB_USER="${USERPASS%%:*}"           # up to first colon
+    DB_PASS="${USERPASS#*:}"            # after first colon
+    echo -e "${GREEN}   ✓ Parsed successfully${NC}"
             else
                 echo -e "${RED}❌ Invalid connection string!${NC}"
                 exit 1
