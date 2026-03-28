@@ -204,7 +204,7 @@ build_and_run_qemu() {
         -device "virtio-blk-pci,drive=hd0,iothread=io0" \
         -drive "file=$seed_file,format=raw,if=virtio,cache=writeback" \
         -boot order=c \
-        -device "virtio-net-pci,netdev=n0,rx_queue_size=256,tx_queue_size=256,romfile=" \
+        -device "virtio-net-pci,netdev=n0,rx_queue_size=256,tx_queue_size=256,romfile=,host_mtu=1500" \
         -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22,dns=8.8.8.8${netdev_extra}" \
         -object rng-random,filename=/dev/urandom,id=rng0 \
         -device virtio-rng-pci,rng=rng0 \
@@ -1109,7 +1109,7 @@ write_files:
       {
         "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4"],
         "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
-        "mtu": 1280,
+        "mtu": 1420,
         "log-driver": "json-file",
         "log-opts": {"max-size": "10m", "max-file": "3"},
         "live-restore": true,

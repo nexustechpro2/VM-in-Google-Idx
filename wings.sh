@@ -181,9 +181,9 @@ if [ "$IS_CONTAINER" = true ]; then
 {
   "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4", "1.0.0.1"],
   "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
-  "mtu": 1280,
-  "iptables": false,
-  "ip6tables": false,
+  "mtu": 1420,
+  "iptables": true,
+  "ip-masq": true,
   "ipv6": false,
   "userland-proxy": true,
   "default-address-pools": [{"base": "172.25.0.0/16", "size": 24}],
@@ -202,7 +202,7 @@ else
 {
   "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4", "1.0.0.1"],
   "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
-  "mtu": 1280,
+  "mtu": 1420,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
   "live-restore": true,
@@ -220,6 +220,19 @@ fi
 # TCP MSS clamping — fixes slow/broken downloads when ICMP is blocked
 iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
+# Enable TCP BBR congestion control
+modprobe tcp_bbr 2>/dev/null || true
+echo "tcp_bbr" >> /etc/modules-load.d/modules.conf 2>/dev/null || true
+cat >> /etc/sysctl.conf <<'SYSCTL'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 87380 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+SYSCTL
+sysctl -p >/dev/null 2>&1 || true
+
 # Fix: keep Docker iptables rules alive — prevent network death after time
 cat > /etc/systemd/system/docker-iptables-repair.service <<'IPTEOF'
 [Unit]
@@ -229,7 +242,7 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'iptables -C DOCKER-USER -j RETURN 2>/dev/null || systemctl restart docker'
+ExecStart=/bin/bash -c 'iptables -C DOCKER-USER -j RETURN 2>/dev/null || systemctl restart docker; iptables -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu'
 RemainAfterExit=no
 IPTEOF
 

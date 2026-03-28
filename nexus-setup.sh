@@ -160,6 +160,16 @@ if [ -n "$TAILSCALE_IP" ]; then
     print_success "Tailscale IP: $TAILSCALE_IP"
 fi
 
+# NOW lock DNS — Tailscale already connected, preserve its DNS
+chattr -i /etc/resolv.conf 2>/dev/null || true
+cat > /etc/resolv.conf <<'DNSEOF'
+nameserver 100.100.100.100
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+options timeout:2 attempts:2 rotate
+DNSEOF
+chattr +i /etc/resolv.conf
+
 # ============================================================
 # STEP 7 — INSTALL SSHX (ONE INSTANCE ONLY)
 # ============================================================
@@ -193,33 +203,6 @@ systemctl enable sshx
 systemctl start sshx
 
 print_success "sshx installed and running as a service (single instance)!"
-
-# ============================================================
-# STEP 8 — SETUP KEEPALIVE SERVICE
-# ============================================================
-print_step "Setting up keepalive service..."
-
-tee /etc/systemd/system/keepalive.service << 'EOF'
-[Unit]
-Description=Server Keepalive Service
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/bin/bash -c 'while true; do echo "Server alive - $(date)"; sleep 60; done'
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable keepalive
-systemctl start keepalive
-
-print_success "Keepalive service running (pings every 60 seconds)!"
-
 # ============================================================
 # STEP 9 — DISABLE FREEZE-CAUSING SERVICES
 # ============================================================
@@ -251,7 +234,6 @@ echo "  ✅ xrdp (port 3389) - Resolution 1280x720"
 echo "  ✅ sshx (single instance, auto-restart)"
 echo "  ✅ Tailscale (secure tunnel)"
 echo "  ✅ Firefox (launch with: DISPLAY=:10 firefox &)"
-echo "  ✅ Keepalive (pings every 60s)"
 echo ""
 echo -e "${YELLOW}sshx Link:${NC}"
 sleep 4

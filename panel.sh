@@ -256,8 +256,63 @@ apt update -qq 2>&1 | grep -v "GPG error" || true
 apt upgrade -y -qq 2>&1 | grep -v "GPG error" || true
 echo -e "${GREEN}   ✓ System updated${NC}"
 
+echo -e "${CYAN}[3b/20] Applying network performance tuning...${NC}"
+modprobe tcp_bbr 2>/dev/null || true
+echo "tcp_bbr" >> /etc/modules-load.d/modules.conf 2>/dev/null || true
+cat > /etc/sysctl.d/99-network-perf.conf <<'SYSCTL'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 87380 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+net.core.netdev_max_backlog=300000
+net.core.somaxconn=65535
+net.ipv4.tcp_fastopen=3
+net.ipv4.ip_forward=1
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=15
+SYSCTL
+sysctl -p /etc/sysctl.d/99-network-perf.conf >/dev/null 2>&1 || true
+apt install -y nscd 2>/dev/null || true
+cat > /etc/nscd.conf <<'NSCDEOF'
+enable-cache            hosts           yes
+positive-time-to-live   hosts           3600
+negative-time-to-live   hosts           20
+suggested-size          hosts           211
+check-files             hosts           yes
+persistent              hosts           yes
+shared                  hosts           yes
+NSCDEOF
+systemctl enable nscd 2>/dev/null || true
+systemctl restart nscd 2>/dev/null || true
+echo -e "${GREEN}   ✓ BBR + DNS cache applied${NC}"
+
 # ============================================================================
-# INSTALL NODE.JS + YARN (required for plugins)
+# NETWORK PERFORMANCE TUNING
+# ============================================================================
+echo -e "${CYAN}[3b/20] Applying network performance tuning...${NC}"
+modprobe tcp_bbr 2>/dev/null || true
+echo "tcp_bbr" >> /etc/modules-load.d/modules.conf 2>/dev/null || true
+cat > /etc/sysctl.d/99-network-perf.conf <<'SYSCTL'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 87380 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+net.core.netdev_max_backlog=300000
+net.core.somaxconn=65535
+net.ipv4.tcp_fastopen=3
+net.ipv4.ip_forward=1
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=15
+SYSCTL
+sysctl -p /etc/sysctl.d/99-network-perf.conf >/dev/null 2>&1 || true
+echo -e "${GREEN}   ✓ BBR + buffer tuning applied${NC}"
+
+# ============================================================================
+# INSTALL NODE.JS + YARN
 # ============================================================================
 echo -e "${CYAN}[4b/20] Installing Node.js + Yarn (required for plugins)...${NC}"
 if ! command -v node &>/dev/null; then
@@ -330,6 +385,9 @@ mkdir -p "$COMPOSER_HOME"
 if ! command -v composer &> /dev/null; then
     curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer --quiet 2>/dev/null
 fi
+# Force persistent DB connections
+sed -i "s/'persistent' => false/'persistent' => env('DB_PERSISTENT', false)/" \
+    /var/www/pelican/config/database.php 2>/dev/null || true
 echo -e "${GREEN}   ✓ Composer $(composer --version 2>/dev/null | cut -d' ' -f3)${NC}"
 
 # ============================================================================
@@ -419,6 +477,7 @@ DB_PORT=${DB_PORT_VAL}
 DB_DATABASE=${DB_NAME_VAL}
 DB_USERNAME=${DB_USER_VAL}
 DB_PASSWORD=${DB_PASS_VAL}
+DB_PERSISTENT=true
 # Redis Configuration
 REDIS_HOST=${REDIS_HOST_VAL}
 REDIS_PORT=${REDIS_PORT_VAL}
@@ -431,6 +490,7 @@ SESSION_DRIVER=redis
 QUEUE_CONNECTION=redis
 SESSION_LIFETIME=120
 SESSION_ENCRYPT=false
+CACHE_TTL=3600
 REDIS_CLIENT=phpredis
 # Mail Configuration
 MAIL_MAILER=smtp
@@ -516,10 +576,10 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -subj "/CN=${PANEL_DOMAIN}" 2>/dev/null
 
 cat > /etc/nginx/sites-available/pelican.conf <<'NGINXEOF'
-server_tokens off;
 server {
     listen 0.0.0.0:8443 ssl http2;
     listen [::]:8443 ssl http2;
+    server_tokens off;
 
     server_name _;
     ssl_certificate /etc/ssl/pelican/cert.pem;
@@ -533,9 +593,9 @@ server {
     ssl_session_timeout 1d;
     ssl_session_tickets off;
 
-    # --- OCSP Stapling ---
-    ssl_stapling on;
-    ssl_stapling_verify on;
+# OCSP stapling disabled — self-signed cert has no OCSP responder
+    # ssl_stapling on;
+    # ssl_stapling_verify on;
     resolver 1.1.1.1 8.8.8.8 valid=300s;
     resolver_timeout 5s;
 
@@ -561,21 +621,22 @@ server {
         text/xml application/xml text/javascript application/x-font-ttf
         font/opentype image/svg+xml image/x-icon;
 
+    # --- Security Headers (server-level, applies to all locations) ---
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Robots-Tag none always;
+    add_header Content-Security-Policy "frame-ancestors 'self'" always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy same-origin always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+
     location ~* \.(jpg|jpeg|png|gif|ico|css|js|woff|woff2|ttf|svg|webp)$ {
         expires 30d;
-        add_header Cache-Control "public, no-transform, immutable";
+        add_header Cache-Control "public, no-transform, immutable" always;
+        add_header X-Content-Type-Options nosniff always;
         access_log off;
     }
-
-    # --- Security Headers ---
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
-    add_header X-Content-Type-Options nosniff;
-    add_header X-XSS-Protection "1; mode=block";
-    add_header X-Robots-Tag none;
-    add_header Content-Security-Policy "frame-ancestors 'self'";
-    add_header X-Frame-Options DENY;
-    add_header Referrer-Policy same-origin;
-    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
 
     location / {
         try_files $uri $uri/ /index.php?$query_string;
@@ -590,9 +651,10 @@ server {
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_param HTTP_PROXY "";
         fastcgi_intercept_errors off;
-        fastcgi_buffer_size 32k;
-        fastcgi_buffers 8 32k;
-        fastcgi_busy_buffers_size 64k;
+        fastcgi_buffer_size 128k;
+        fastcgi_buffers 16 128k;
+        fastcgi_busy_buffers_size 256k;
+        fastcgi_temp_file_write_size 256k;
         fastcgi_connect_timeout 60;
         fastcgi_send_timeout 300;
         fastcgi_read_timeout 300;
@@ -774,9 +836,20 @@ fi
 sleep 2
 echo -e "${GREEN}   ✓ All caches cleared${NC}"
 
-# Fix DNS
-echo "nameserver 1.1.1.1
-nameserver 8.8.8.8" > /etc/resolv.conf
+# Fix DNS — lock resolv.conf so Tailscale/DHCP/systemd can't overwrite it
+# Fix DNS — lock so nothing overwrites it
+systemctl disable systemd-resolved 2>/dev/null || true
+systemctl stop systemd-resolved 2>/dev/null || true
+chattr -i /etc/resolv.conf 2>/dev/null || true
+rm -f /etc/resolv.conf
+cat > /etc/resolv.conf <<'DNSEOF'
+nameserver 100.100.100.100
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+options timeout:2 attempts:2 rotate
+DNSEOF
+chattr +i /etc/resolv.conf
 
 # Enable OPcache
 cat > /etc/php/${PHP_VERSION}/mods-available/opcache.ini <<OPCEOF
@@ -786,12 +859,11 @@ opcache.enable_cli=0
 opcache.memory_consumption=256
 opcache.interned_strings_buffer=32
 opcache.max_accelerated_files=30000
-opcache.revalidate_freq=0
-opcache.fast_shutdown=1
 opcache.validate_timestamps=0
 opcache.save_comments=1
 opcache.huge_code_pages=0
-opcache.preload_user=www-data
+; opcache.preload=/var/www/pelican/bootstrap/cache/preload.php
+; opcache.preload_user=www-data
 realpath_cache_size=4096K
 realpath_cache_ttl=600
 OPCEOF

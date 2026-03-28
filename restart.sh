@@ -61,6 +61,16 @@ fi
 
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
 SERVICES_STARTED=0
+# Lock DNS
+chattr -i /etc/resolv.conf 2>/dev/null || true
+cat > /etc/resolv.conf <<'DNSEOF'
+nameserver 100.100.100.100
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+options timeout:2 attempts:2 rotate
+DNSEOF
+chattr +i /etc/resolv.conf
 
 # ============================================================================
 # 1. START DOCKER
@@ -81,7 +91,7 @@ cat > /etc/docker/daemon.json <<'DOCKEREOF'
 {
   "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4"],
   "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
-  "mtu": 1280,
+  "mtu": 1420,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
   "live-restore": true,
