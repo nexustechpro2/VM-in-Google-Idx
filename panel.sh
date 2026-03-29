@@ -136,53 +136,41 @@ if [ ! -f "$ENV_FILE" ]; then
     [[ -z "$CF_TOKEN" ]] && { echo -e "${RED}❌ Token required!${NC}"; exit 1; }
 
     echo ""
-    echo "Database Type:"
-    echo "1) PostgreSQL (Recommended)"
-    echo "2) MySQL/MariaDB"
-    read -p "Choice [1]: " DB_TYPE
-    DB_TYPE=${DB_TYPE:-1}
+echo "Database Type:"
+echo "1) PostgreSQL (Recommended)"
+echo "2) MySQL/MariaDB"
+echo "3) SQLite (Simple, no server needed)"
+read -p "Choice [1]: " DB_TYPE
 
-    if [ "$DB_TYPE" = "1" ]; then
-        DB_DRIVER="pgsql"
+if [ "$DB_TYPE" = "1" ]; then
+    DB_DRIVER="pgsql"
 
+    echo ""
+    echo "PostgreSQL Configuration:"
+    echo "1) Enter connection details manually"
+    echo "2) Use connection string (postgresql://...)"
+    read -p "Choice [1]: " PG_CONFIG_TYPE
+    PG_CONFIG_TYPE=${PG_CONFIG_TYPE:-1}
+
+    if [ "$PG_CONFIG_TYPE" = "2" ]; then
         echo ""
-        echo "PostgreSQL Configuration:"
-        echo "1) Enter connection details manually"
-        echo "2) Use connection string (postgresql://...)"
-        read -p "Choice [1]: " PG_CONFIG_TYPE
-        PG_CONFIG_TYPE=${PG_CONFIG_TYPE:-1}
+        echo "Example: postgresql://user:pass@host:port/database"
+        read -p "PostgreSQL Connection String: " PG_CONN_STRING
 
-        if [ "$PG_CONFIG_TYPE" = "2" ]; then
-            echo ""
-            echo "Example: postgresql://user:pass@host:port/database"
-            read -p "PostgreSQL Connection String: " PG_CONN_STRING
-
-if [[ $PG_CONN_STRING =~ ^postgres(ql)?://(.+)@([^@:]+):([0-9]+)/([^?]+) ]]; then
-    USERPASS="${BASH_REMATCH[2]}"
-    DB_HOST="${BASH_REMATCH[3]}"
-    DB_PORT="${BASH_REMATCH[4]}"
-    DB_NAME="${BASH_REMATCH[5]}"
-    DB_USER="${USERPASS%%:*}"           # up to first colon
-    DB_PASS="${USERPASS#*:}"            # after first colon
-    echo -e "${GREEN}   ✓ Parsed successfully${NC}"
-            else
-                echo -e "${RED}❌ Invalid connection string!${NC}"
-                exit 1
-            fi
+        if [[ $PG_CONN_STRING =~ ^postgres(ql)?://(.+)@([^@:]+):([0-9]+)/([^?]+) ]]; then
+            USERPASS="${BASH_REMATCH[2]}"
+            DB_HOST="${BASH_REMATCH[3]}"
+            DB_PORT="${BASH_REMATCH[4]}"
+            DB_NAME="${BASH_REMATCH[5]}"
+            DB_USER="${USERPASS%%:*}"
+            DB_PASS="${USERPASS#*:}"
+            echo -e "${GREEN}   ✓ Parsed successfully${NC}"
         else
-            DB_PORT_DEFAULT="5432"
-            read -p "Database Host: " DB_HOST
-            read -p "Database Port [$DB_PORT_DEFAULT]: " DB_PORT
-            DB_PORT=${DB_PORT:-$DB_PORT_DEFAULT}
-            read -p "Database Name: " DB_NAME
-            read -p "Database Username: " DB_USER
-            read -sp "Database Password: " DB_PASS
-            echo ""
+            echo -e "${RED}❌ Invalid connection string!${NC}"
+            exit 1
         fi
     else
-        DB_DRIVER="mysql"
-        DB_PORT_DEFAULT="3306"
-
+        DB_PORT_DEFAULT="5432"
         read -p "Database Host: " DB_HOST
         read -p "Database Port [$DB_PORT_DEFAULT]: " DB_PORT
         DB_PORT=${DB_PORT:-$DB_PORT_DEFAULT}
@@ -192,6 +180,29 @@ if [[ $PG_CONN_STRING =~ ^postgres(ql)?://(.+)@([^@:]+):([0-9]+)/([^?]+) ]]; the
         echo ""
     fi
 
+elif [ "$DB_TYPE" = "3" ]; then
+    DB_DRIVER="sqlite"
+    DB_HOST=""
+    DB_PORT=""
+    DB_NAME="/var/www/pelican/database/database.sqlite"
+    DB_USER=""
+    DB_PASS=""
+    mkdir -p /var/www/pelican/database
+    touch /var/www/pelican/database/database.sqlite
+    chown -R www-data:www-data /var/www/pelican/database
+    echo -e "${GREEN}   ✓ SQLite selected${NC}"
+
+else
+    DB_DRIVER="mysql"
+    DB_PORT_DEFAULT="3306"
+    read -p "Database Host: " DB_HOST
+    read -p "Database Port [$DB_PORT_DEFAULT]: " DB_PORT
+    DB_PORT=${DB_PORT:-$DB_PORT_DEFAULT}
+    read -p "Database Name: " DB_NAME
+    read -p "Database Username: " DB_USER
+    read -sp "Database Password: " DB_PASS
+    echo ""
+fi
     read -p "Redis Host [127.0.0.1]: " REDIS_HOST
     REDIS_HOST=${REDIS_HOST:-127.0.0.1}
     read -p "Redis Port [6379]: " REDIS_PORT
@@ -289,29 +300,6 @@ systemctl restart nscd 2>/dev/null || true
 echo -e "${GREEN}   ✓ BBR + DNS cache applied${NC}"
 
 # ============================================================================
-# NETWORK PERFORMANCE TUNING
-# ============================================================================
-echo -e "${CYAN}[3b/20] Applying network performance tuning...${NC}"
-modprobe tcp_bbr 2>/dev/null || true
-echo "tcp_bbr" >> /etc/modules-load.d/modules.conf 2>/dev/null || true
-cat > /etc/sysctl.d/99-network-perf.conf <<'SYSCTL'
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-net.core.rmem_max=134217728
-net.core.wmem_max=134217728
-net.ipv4.tcp_rmem=4096 87380 67108864
-net.ipv4.tcp_wmem=4096 65536 67108864
-net.core.netdev_max_backlog=300000
-net.core.somaxconn=65535
-net.ipv4.tcp_fastopen=3
-net.ipv4.ip_forward=1
-net.ipv4.tcp_tw_reuse=1
-net.ipv4.tcp_fin_timeout=15
-SYSCTL
-sysctl -p /etc/sysctl.d/99-network-perf.conf >/dev/null 2>&1 || true
-echo -e "${GREEN}   ✓ BBR + buffer tuning applied${NC}"
-
-# ============================================================================
 # INSTALL NODE.JS + YARN
 # ============================================================================
 echo -e "${CYAN}[4b/20] Installing Node.js + Yarn (required for plugins)...${NC}"
@@ -360,7 +348,7 @@ apt install -y nginx 2>/dev/null || true
 
 if [ "$DB_DRIVER" = "pgsql" ]; then
     apt install -y postgresql-client 2>/dev/null || true
-else
+elif [ "$DB_DRIVER" = "mysql" ]; then
     apt install -y mysql-client 2>/dev/null || apt install -y mariadb-client 2>/dev/null || true
 fi
 
@@ -385,9 +373,6 @@ mkdir -p "$COMPOSER_HOME"
 if ! command -v composer &> /dev/null; then
     curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer --quiet 2>/dev/null
 fi
-# Force persistent DB connections
-sed -i "s/'persistent' => false/'persistent' => env('DB_PERSISTENT', false)/" \
-    /var/www/pelican/config/database.php 2>/dev/null || true
 echo -e "${GREEN}   ✓ Composer $(composer --version 2>/dev/null | cut -d' ' -f3)${NC}"
 
 # ============================================================================
@@ -435,6 +420,10 @@ else
     echo -e "${GREEN}   ✓ Dependencies already installed${NC}"
 fi
 
+# Force persistent DB connections
+sed -i "s/'persistent' => false/'persistent' => env('DB_PERSISTENT', false)/" \
+    /var/www/pelican/config/database.php 2>/dev/null || true
+
 # ============================================================================
 # CONFIGURE ENVIRONMENT (CRITICAL: PRESERVE APP_KEY!)
 # ============================================================================
@@ -469,7 +458,15 @@ REDIS_HOST_VAL=$(grep '^REDIS_HOST=' "$ENV_FILE" | cut -d'"' -f2)
 REDIS_PORT_VAL=$(grep '^REDIS_PORT=' "$ENV_FILE" | cut -d'"' -f2)
 REDIS_PASS_VAL=$(grep '^REDIS_PASS=' "$ENV_FILE" | cut -d'"' -f2)
 
-cat >> .env <<ENVEOF
+# Write DB config based on driver
+if [ "$DB_DRIVER" = "sqlite" ]; then
+    cat >> .env <<ENVEOF
+# Database Configuration
+DB_CONNECTION=sqlite
+DB_DATABASE=/var/www/pelican/database/database.sqlite
+ENVEOF
+else
+    cat >> .env <<ENVEOF
 # Database Configuration
 DB_CONNECTION=${DB_DRIVER}
 DB_HOST=${DB_HOST_VAL}
@@ -478,11 +475,14 @@ DB_DATABASE=${DB_NAME_VAL}
 DB_USERNAME=${DB_USER_VAL}
 DB_PASSWORD=${DB_PASS_VAL}
 DB_PERSISTENT=true
+ENVEOF
+fi
+
+cat >> .env <<ENVEOF
 # Redis Configuration
 REDIS_HOST=${REDIS_HOST_VAL}
 REDIS_PORT=${REDIS_PORT_VAL}
 REDIS_PASSWORD=${REDIS_PASS_VAL}
-# Cache & Session
 # Cache & Session
 CACHE_DRIVER=redis
 CACHE_STORE=redis
@@ -693,7 +693,10 @@ DB_USER_VAL=$(grep '^DB_USER=' "$ENV_FILE" | cut -d'"' -f2)
 DB_PASS_VAL=$(grep '^DB_PASS=' "$ENV_FILE" | cut -d'"' -f2)
 
 DB_HAS_DATA=false
-if [ "$DB_DRIVER" = "pgsql" ]; then
+if [ "$DB_DRIVER" = "sqlite" ]; then
+    TABLE_COUNT=0
+    echo -e "${GREEN}   ✓ SQLite — skipping connection check${NC}"
+elif [ "$DB_DRIVER" = "pgsql" ]; then
     TABLE_COUNT=$(PGPASSWORD="$DB_PASS_VAL" psql \
     "sslmode=require host=$DB_HOST_VAL port=$DB_PORT_VAL dbname=$DB_NAME_VAL user=$DB_USER_VAL password=$DB_PASS_VAL" \
     -tAc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';" \
@@ -837,7 +840,6 @@ sleep 2
 echo -e "${GREEN}   ✓ All caches cleared${NC}"
 
 # Fix DNS — lock resolv.conf so Tailscale/DHCP/systemd can't overwrite it
-# Fix DNS — lock so nothing overwrites it
 systemctl disable systemd-resolved 2>/dev/null || true
 systemctl stop systemd-resolved 2>/dev/null || true
 chattr -i /etc/resolv.conf 2>/dev/null || true
