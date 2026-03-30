@@ -187,10 +187,12 @@ elif [ "$DB_TYPE" = "3" ]; then
     DB_NAME="/var/www/pelican/database/database.sqlite"
     DB_USER=""
     DB_PASS=""
-    mkdir -p /var/www/pelican/database
-    touch /var/www/pelican/database/database.sqlite
-    chown -R www-data:www-data /var/www/pelican/database
-    echo -e "${GREEN}   ✓ SQLite selected${NC}"
+mkdir -p /var/www/pelican/database
+touch /var/www/pelican/database/database.sqlite
+chown -R www-data:www-data /var/www/pelican/database
+chmod 775 /var/www/pelican/database
+chmod 664 /var/www/pelican/database/database.sqlite
+echo -e "${GREEN}   ✓ SQLite selected${NC}"
 
 else
     DB_DRIVER="mysql"
@@ -528,6 +530,11 @@ echo -e "${GREEN}   ✓ Environment configured (APP_KEY preserved)${NC}"
 echo -e "${CYAN}[11/20] Setting permissions...${NC}"
 chmod -R 755 storage/* bootstrap/cache/ 2>/dev/null || true
 chown -R www-data:www-data /var/www/pelican
+# SQLite specific permissions
+if [ "$DB_DRIVER" = "sqlite" ]; then
+    chmod 775 /var/www/pelican/database
+    chmod 664 /var/www/pelican/database/database.sqlite
+fi
 mkdir -p storage/logs
 touch storage/logs/laravel.log
 chmod -R 775 storage/logs
@@ -678,6 +685,7 @@ else
     nginx 2>/dev/null || true
 fi
 
+systemctl enable nginx php${PHP_VERSION}-fpm 2>/dev/null || true
 echo -e "${GREEN}   ✓ Nginx configured on port 8443${NC}"
 
 # ============================================================================
@@ -854,8 +862,9 @@ DNSEOF
 chattr +i /etc/resolv.conf
 
 # Enable OPcache
+apt install -y php${PHP_VERSION}-opcache 2>/dev/null || true
 cat > /etc/php/${PHP_VERSION}/mods-available/opcache.ini <<OPCEOF
-zend_extension=opcache.so
+zend_extension=opcache
 opcache.enable=1
 opcache.enable_cli=0
 opcache.memory_consumption=256

@@ -43,8 +43,11 @@ cd /var/www/pelican
 # SET CORRECT PHP BINARY
 # ============================================================================
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
-PHP_BIN="/usr/bin/php8.3"
-[ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php 2>/dev/null || echo "php")
+PHP_BIN=""
+for ver in 8.5 8.4 8.3 8.2; do
+    [ -f "/usr/bin/php${ver}" ] && PHP_BIN="/usr/bin/php${ver}" && break
+done
+[ -z "$PHP_BIN" ] && PHP_BIN=$(which php 2>/dev/null || echo "php")
 echo -e "${BLUE}Using PHP: $($PHP_BIN -v | head -n1)${NC}"
 echo ""
 
@@ -93,8 +96,9 @@ if [ "$DB_CONNECTION" = "pgsql" ]; then
     if ! $PHP_BIN -m | grep -q pdo_pgsql; then
         echo -e "${YELLOW}   ⚠ Installing pgsql extensions...${NC}"
         apt-get update -qq 2>&1 | grep -v "GPG error" || true
-        apt-get install -y php8.3-pgsql php8.3-pdo php-pgsql 2>/dev/null || { echo -e "${RED}❌ Failed!${NC}"; exit 1; }
-        systemctl restart php8.3-fpm 2>/dev/null || service php8.3-fpm restart 2>/dev/null || true
+PHP_VER=$(ls /etc/php/ | sort -rV | head -1)
+        apt-get install -y php${PHP_VER}-pgsql php${PHP_VER}-pdo php-pgsql 2>/dev/null || { echo -e "${RED}❌ Failed!${NC}"; exit 1; }
+        systemctl restart php${PHP_VER}-fpm 2>/dev/null || service php${PHP_VER}-fpm restart 2>/dev/null || true
         $PHP_BIN -m | grep -q pdo_pgsql || { echo -e "${RED}❌ Extension still not available!${NC}"; exit 1; }
     fi
     echo -e "${GREEN}   ✓ PostgreSQL PHP extensions verified${NC}"
@@ -444,18 +448,16 @@ rm -rf storage/framework/cache/* 2>/dev/null && echo -e "${GREEN}   ✓ Framewor
 
 redis-cli FLUSHDB >/dev/null 2>&1 && echo -e "${GREEN}   ✓ Redis cache cleared${NC}"
 
-# Restart services
+PHP_VER=$(ls /etc/php/ | sort -rV | head -1)
 systemctl restart nginx 2>/dev/null && echo -e "${GREEN}   ✓ Nginx restarted${NC}" || true
-systemctl restart php8.3-fpm 2>/dev/null && echo -e "${GREEN}   ✓ PHP-FPM restarted${NC}" || true
+systemctl restart php${PHP_VER}-fpm 2>/dev/null && echo -e "${GREEN}   ✓ PHP-FPM restarted${NC}" || true
 supervisorctl restart pelican-queue 2>/dev/null && echo -e "${GREEN}   ✓ Queue worker restarted${NC}" || true
 
 # Restart Wings
-if pgrep -x wings > /dev/null; then
-    pkill wings 2>/dev/null || true
-    sleep 2
-    cd /etc/pelican && nohup wings > /tmp/wings.log 2>&1 &
+if [ -f "/usr/local/bin/wings" ]; then
+    systemctl restart wings 2>/dev/null || true
     sleep 3
-    pgrep -x wings > /dev/null && echo -e "${GREEN}   ✓ Wings restarted${NC}" || echo -e "${YELLOW}   ⚠ Wings restart failed - check manually${NC}"
+    systemctl is-active --quiet wings && echo -e "${GREEN}   ✓ Wings restarted${NC}" || echo -e "${YELLOW}   ⚠ Wings restart failed - check manually${NC}"
 fi
 
 # ============================================================================

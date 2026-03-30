@@ -84,6 +84,7 @@ else
     echo -e "${YELLOW}   Starting Docker daemon...${NC}"
     pkill -9 dockerd 2>/dev/null || true
     rm -f /var/run/docker.sock /var/run/docker.pid
+    systemctl reset-failed docker 2>/dev/null || true
     sleep 2
 
     # Ensure correct daemon.json (DNS fix for containers)
@@ -185,6 +186,7 @@ else
         pkill -9 php-fpm 2>/dev/null || true
         sleep 1
 
+        systemctl enable php${PHP_VERSION}-fpm 2>/dev/null || true
         systemctl start php${PHP_VERSION}-fpm 2>/dev/null || \
         service php${PHP_VERSION}-fpm start 2>/dev/null || \
         /usr/sbin/php-fpm${PHP_VERSION} -D 2>/dev/null || true
@@ -287,7 +289,15 @@ else
     pkill -x wings 2>/dev/null || true
     sleep 2
 
-    if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
+if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
+        # Ensure Docker is running before Wings
+        if ! docker info >/dev/null 2>&1; then
+            systemctl reset-failed docker 2>/dev/null || true
+            rm -f /var/run/docker.pid /var/run/docker.sock
+            systemctl start docker
+            sleep 5
+        fi
+        systemctl reset-failed wings 2>/dev/null || true
         systemctl start wings 2>/dev/null
         sleep 5
         if systemctl is-active --quiet wings; then
@@ -341,7 +351,7 @@ fi
 # ============================================================================
 # 8. CLEAR PANEL CACHE
 # ============================================================================
-echo -e "${CYAN}[8/8] Clearing Panel cache...${ NC}"
+echo -e "${CYAN}[8/8] Clearing Panel cache...${NC}"
 
 if [ -d "/var/www/pelican" ]; then
     cd /var/www/pelican

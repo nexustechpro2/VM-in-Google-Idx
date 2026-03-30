@@ -169,6 +169,15 @@ if ! command -v docker &>/dev/null; then
 fi
 echo -e "${GREEN}   ✓ Docker installed: $(docker --version 2>/dev/null | cut -d' ' -f3 | tr -d ',')${NC}"
 
+mkdir -p /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/restart.conf <<'EOF'
+[Service]
+Restart=always
+RestartSec=5
+StartLimitInterval=0
+EOF
+systemctl daemon-reload
+
 # ============================================================================
 # CONFIGURE AND START DOCKER
 # ============================================================================
@@ -279,6 +288,10 @@ if docker info >/dev/null 2>&1; then
 else
     echo -e "${YELLOW}   Docker not running, starting...${NC}"
 
+rm -f /var/run/docker.pid
+rm -f /var/run/docker.sock
+systemctl reset-failed docker 2>/dev/null || true
+
     # Try systemd first (proper way on VMs)
     if [ "$HAS_SYSTEMD" = true ]; then
         systemctl enable docker 2>/dev/null || true
@@ -374,6 +387,9 @@ chmod +x wings
 [ ! -x /usr/local/bin/wings ] && echo -e "${RED}   ❌ Wings download failed${NC}" && exit 1
 WINGS_VERSION=$(wings --version 2>/dev/null | grep -oP 'wings \Kv[\d\.]+' || echo "latest")
 echo -e "${GREEN}   ✓ Wings ${WINGS_VERSION} installed${NC}"
+mkdir -p /var/lib/pelican/volumes
+chown -R pelican:pelican /var/lib/pelican 2>/dev/null || true
+chmod 755 /var/lib/pelican
 
 # ============================================================================
 # SSL CERTIFICATES
@@ -408,6 +424,7 @@ sed -i 's/port: 443/port: 8080/' /etc/pelican/config.yml
 sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml
 sed -i 's/host: 127.0.0.1/host: 0.0.0.0/' /etc/pelican/config.yml
 sed -i 's/IPv6: true/IPv6: false/' /etc/pelican/config.yml
+sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml
 sed -i '/dns:/,/- 1.0.0.1/ c\    dns:\n    - 8.8.8.8\n    - 1.1.1.1' /etc/pelican/config.yml
 sed -i '/^      v6:/,/^        gateway:/ s/^/#/' /etc/pelican/config.yml
 if [ "$USE_HOST_NETWORK" = true ]; then
@@ -478,10 +495,9 @@ User=root
 WorkingDirectory=/etc/pelican
 LimitNOFILE=4096
 ExecStart=/usr/local/bin/wings
-Restart=on-failure
-StartLimitInterval=180
-StartLimitBurst=30
+Restart=always
 RestartSec=5s
+StartLimitInterval=0
 [Install]
 WantedBy=multi-user.target
 WEOF
@@ -516,14 +532,18 @@ ps aux | grep -v grep | grep -q cloudflared && echo -e "${GREEN}   ✓ Cloudflar
 # ============================================================================
 echo -e "${CYAN}[19/20] Clearing Panel cache (if present)...${NC}"
 if [ -d "/var/www/pelican" ]; then
-    PHP_BIN="/usr/bin/php8.3"
-    [ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php)
+    PANEL_PHP=""
+    for ver in 8.5 8.4 8.3 8.2; do
+        [ -f "/usr/bin/php${ver}" ] && PANEL_PHP="/usr/bin/php${ver}" && break
+    done
+    [ -z "$PANEL_PHP" ] && PANEL_PHP=$(which php)
     cd /var/www/pelican
-    $PHP_BIN artisan config:clear >/dev/null 2>&1 || true
-    $PHP_BIN artisan cache:clear >/dev/null 2>&1 || true
-    $PHP_BIN artisan view:clear >/dev/null 2>&1 || true
+    $PANEL_PHP artisan config:clear >/dev/null 2>&1 || true
+    $PANEL_PHP artisan cache:clear >/dev/null 2>&1 || true
+    $PANEL_PHP artisan view:clear >/dev/null 2>&1 || true
     rm -rf storage/framework/views/* 2>/dev/null || true
-    systemctl restart php8.3-fpm nginx 2>/dev/null || { pkill php-fpm; /usr/sbin/php-fpm8.3 -D; pkill nginx; nginx; } 2>/dev/null || true
+    PANEL_PHP_VER=$(ls /etc/php/ | sort -rV | head -1)
+    systemctl restart php${PANEL_PHP_VER}-fpm nginx 2>/dev/null || true
     supervisorctl restart pelican-queue 2>/dev/null || true
     sleep 2
     echo -e "${GREEN}   ✓ Panel cache cleared${NC}"
@@ -552,7 +572,7 @@ ps aux | grep -v grep | grep -q wings && { echo -e "${GREEN}  ✓ Wings running$
 ps aux | grep -v grep | grep -q cloudflared && { echo -e "${GREEN}  ✓ Cloudflare Tunnel${NC}"; ((CHECKS++)); }
 [ -f /etc/pelican/config.yml ] && { echo -e "${GREEN}  ✓ Configuration exists${NC}"; ((CHECKS++)); }
 netstat -tulpn 2>/dev/null | grep -q 8080 && { echo -e "${GREEN}  ✓ Wings on port 8080${NC}"; ((CHECKS++)); }
-WINGS_TEST=$(curl -k https://localhost:8080/api/system 2>&1 || echo "FAILED")
+WINGS_TEST=$(curl -s http://localhost:8080/api/system 2>&1 || echo "FAILED")
 echo "$WINGS_TEST" | grep -q "error.*authorization" && { echo -e "${GREEN}  ✓ Wings API responding${NC}"; ((CHECKS++)); } || echo -e "${YELLOW}  ⚠ Wings API test inconclusive${NC}"
 
 echo ""
