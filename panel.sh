@@ -689,7 +689,7 @@ systemctl enable nginx php${PHP_VERSION}-fpm 2>/dev/null || true
 echo -e "${GREEN}   ✓ Nginx configured on port 8443${NC}"
 
 # ============================================================================
-# RUN DATABASE MIGRATIONS
+# RUN DATABASE MIGRATIONS 
 # ============================================================================
 echo -e "${CYAN}[14/20] Running database migrations...${NC}"
 

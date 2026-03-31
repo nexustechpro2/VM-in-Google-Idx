@@ -455,6 +455,9 @@ supervisorctl restart pelican-queue 2>/dev/null && echo -e "${GREEN}   ✓ Queue
 
 # Restart Wings
 if [ -f "/usr/local/bin/wings" ]; then
+    sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml 2>/dev/null || true
+    sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml 2>/dev/null || true
+    systemctl reset-failed wings 2>/dev/null || true
     systemctl restart wings 2>/dev/null || true
     sleep 3
     systemctl is-active --quiet wings && echo -e "${GREEN}   ✓ Wings restarted${NC}" || echo -e "${YELLOW}   ⚠ Wings restart failed - check manually${NC}"

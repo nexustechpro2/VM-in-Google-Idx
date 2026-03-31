@@ -297,7 +297,9 @@ if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
             systemctl start docker
             sleep 5
         fi
-        systemctl reset-failed wings 2>/dev/null || true
+systemctl reset-failed wings 2>/dev/null || true
+        sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml 2>/dev/null || true
+        sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml 2>/dev/null || true
         systemctl start wings 2>/dev/null
         sleep 5
         if systemctl is-active --quiet wings; then
