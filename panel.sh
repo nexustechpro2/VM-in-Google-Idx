@@ -853,7 +853,6 @@ systemctl stop systemd-resolved 2>/dev/null || true
 chattr -i /etc/resolv.conf 2>/dev/null || true
 rm -f /etc/resolv.conf
 cat > /etc/resolv.conf <<'DNSEOF'
-nameserver 100.100.100.100
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 nameserver 8.8.4.4
