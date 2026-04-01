@@ -349,6 +349,10 @@ fi
     echo -e "${GREEN}   ✓ Started ${TUNNEL_COUNT} Cloudflare tunnel(s)${NC}" || \
     echo -e "${YELLOW}   ⚠ No tunnel tokens found in .pelican.env${NC}"
 
+# Ensure smart watchdog is running
+systemctl start pelican-watchdog 2>/dev/null || true
+echo -e "${GREEN}   ✓ Smart watchdog running${NC}"
+
 # ============================================================================
 # 8. CLEAR PANEL CACHE
 # ============================================================================

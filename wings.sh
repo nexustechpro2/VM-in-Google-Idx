@@ -242,39 +242,89 @@ net.ipv4.tcp_wmem=4096 65536 67108864
 SYSCTL
 sysctl -p >/dev/null 2>&1 || true
 
-# Fix: keep Docker iptables rules alive — prevent network death after time
-cat > /etc/systemd/system/docker-iptables-repair.service <<'IPTEOF'
+# TCP MSS clamping — fixes slow/broken downloads when ICMP is blocked
+iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+# Smart watchdog — only fixes what's actually broken, never blind restarts
+cat > /usr/local/bin/pelican-watchdog.sh <<'WATCHDOG'
+#!/bin/bash
+LOG=/var/log/pelican-watchdog.log
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG"; }
+
+while true; do
+    # Check Wings
+    WINGS_OK=false
+    RESPONSE=$(curl -s http://localhost:8080/api/system 2>/dev/null)
+    echo "$RESPONSE" | grep -q "authorization" && WINGS_OK=true
+
+    if [ "$WINGS_OK" = true ]; then
+        # Wings healthy — just ensure MSS clamp exists
+        iptables -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+            iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        sleep 30
+        continue
+    fi
+
+    log "Wings not responding — diagnosing..."
+
+    # Check Docker first
+    if ! docker info >/dev/null 2>&1; then
+        log "Docker is down — restarting Docker only"
+        systemctl reset-failed docker 2>/dev/null || true
+        rm -f /var/run/docker.pid /var/run/docker.sock
+        systemctl start docker
+        sleep 10
+        if ! docker info >/dev/null 2>&1; then
+            log "Docker failed to restart — giving up this cycle"
+            sleep 30
+            continue
+        fi
+        log "Docker recovered"
+    fi
+
+    # Docker fine but Wings down — restart Wings only
+    if ! systemctl is-active --quiet wings; then
+        log "Wings is down — restarting Wings"
+        sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml 2>/dev/null || true
+        sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml 2>/dev/null || true
+        systemctl reset-failed wings 2>/dev/null || true
+        systemctl start wings
+        sleep 10
+        systemctl is-active --quiet wings && log "Wings recovered" || log "Wings failed — check: journalctl -u wings -n 20"
+    fi
+
+    iptables -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+        iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
+    sleep 30
+done
+WATCHDOG
+chmod +x /usr/local/bin/pelican-watchdog.sh
+
+cat > /etc/systemd/system/pelican-watchdog.service <<'WDEOF'
 [Unit]
-Description=Repair Docker iptables rules if network dies
-After=docker.service
-Requires=docker.service
+Description=Pelican Wings/Docker Smart Watchdog
+After=wings.service docker.service
+Wants=wings.service docker.service
 
 [Service]
-Type=oneshot
-ExecStart=/bin/bash -c 'iptables -C DOCKER-USER -j RETURN 2>/dev/null || systemctl restart docker; iptables -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu'
-RemainAfterExit=no
-IPTEOF
-
-cat > /etc/systemd/system/docker-iptables-repair.timer <<'TIMEREOF'
-[Unit]
-Description=Check Docker iptables every 5 minutes
-Requires=docker-iptables-repair.service
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-Unit=docker-iptables-repair.service
+Type=simple
+ExecStart=/usr/local/bin/pelican-watchdog.sh
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
 [Install]
-WantedBy=timers.target
-TIMEREOF
+WantedBy=multi-user.target
+WDEOF
 
 if [ "$HAS_SYSTEMD" = true ]; then
     systemctl daemon-reload
-    systemctl enable docker-iptables-repair.timer
-    systemctl start docker-iptables-repair.timer
+    systemctl enable pelican-watchdog
+    systemctl start pelican-watchdog
 fi
-echo -e "${GREEN}   ✓ Docker iptables watchdog installed (checks every 5 min)${NC}"
+echo -e "${GREEN}   ✓ Smart watchdog installed (checks every 30s, only fixes what's broken)${NC}"
 
 # Persist iptables rule across reboots
 if [ "$HAS_SYSTEMD" = true ]; then
