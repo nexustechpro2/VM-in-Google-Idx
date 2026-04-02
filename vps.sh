@@ -778,81 +778,78 @@ start_freeze_watchdog() {
         }
 
         recover_local() {
-            local vm=$1
-            local live_img="$_BACKUP_DIR/$vm.img"
-            local snap_compressed="$_SNAPSHOT_DIR/$vm.img.compressed"
-            local serial="$_BACKUP_DIR/$vm.serial.log"
-            local wlog="$_BACKUP_DIR/$vm.watchdog.log"
+    local vm=$1
+    local skip_image=${2:-false}
+    local live_img="$_BACKUP_DIR/$vm.img"
+    local snap_compressed="$_SNAPSHOT_DIR/$vm.img.compressed"
+    local serial="$_BACKUP_DIR/$vm.serial.log"
+    local wlog="$_BACKUP_DIR/$vm.watchdog.log"
 
-            echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$wlog"
+    echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$wlog"
 
-            # Pre-flight — wipe entire tmpfs directory before doing anything
-            echo "[$(date '+%H:%M:%S')] Pre-flight: Wiping tmpfs..." >> "$wlog"
-            rm -rf "${_SNAPSHOT_DIR:?}"/*
-            mkdir -p "${_SNAPSHOT_DIR:?}"
-            echo "[$(date '+%H:%M:%S')] Pre-flight: tmpfs wiped, proceeding..." >> "$wlog"
+    # Step 1 — Kill the frozen VM first
+    echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$wlog"
+    kill_vm_local "$vm"
+    sleep 2
 
-            # Step 1 — Kill the frozen VM first
-            echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$wlog"
-            kill_vm_local "$vm"
-            sleep 2
+    if [[ "$skip_image" != "true" ]]; then
+        # Step 2 — Compress live image directly to tmpfs (zstd)
+        echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$wlog"
+        local tmp_c="${snap_compressed}.compressing"
+        rm -f "$tmp_c" "$snap_compressed"
 
-            # Step 2 — Compress live image directly to tmpfs (zstd)
-            echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$wlog"
-            local tmp_c="${snap_compressed}.compressing"
-            rm -f "$tmp_c" "$snap_compressed"
+        if ! qemu-img convert -O qcow2 -c -o compression_type=zstd "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
+            echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$wlog"
+            rm -f "$tmp_c"
+            return 1
+        fi
+        mv "$tmp_c" "$snap_compressed"
+        echo "[$(date '+%H:%M:%S')] Compressed to tmpfs: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$wlog"
 
-            if ! qemu-img convert -O qcow2 -c -o compression_type=zstd "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
-                echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$wlog"
-                rm -f "$tmp_c"
+        # Step 3 — Compress back to /home with 20 min timeout
+        echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$wlog"
+        local restore_tmp="${live_img}.restoring"
+        rm -f "$live_img" "$restore_tmp"
+
+        qemu-img convert -O qcow2 -c -o compression_type=zstd "$snap_compressed" "$restore_tmp" >> "$wlog" 2>&1 &
+        local compress_pid=$!
+        local elapsed=0
+        local success=false
+
+        while [[ $elapsed -lt 1200 ]]; do
+            if ! kill -0 "$compress_pid" 2>/dev/null; then
+                if [[ -f "$restore_tmp" ]] && qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
+                    success=true
+                fi
+                break
+            fi
+            sleep 5
+            elapsed=$((elapsed + 5))
+        done
+
+        if [[ "$success" == false ]]; then
+            kill "$compress_pid" 2>/dev/null || true
+            wait "$compress_pid" 2>/dev/null || true
+            rm -f "$restore_tmp"
+            echo "[$(date '+%H:%M:%S')] Compress-back timeout/failed — copying directly from tmpfs..." >> "$wlog"
+            if ! cp "$snap_compressed" "$restore_tmp"; then
+                echo "[$(date '+%H:%M:%S')] ERROR: Direct copy also failed" >> "$wlog"
                 return 1
             fi
-            mv "$tmp_c" "$snap_compressed"
-            echo "[$(date '+%H:%M:%S')] Compressed to tmpfs: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$wlog"
-
-            # Step 3 — Compress back to /home with 20 min timeout
-            echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$wlog"
-            local restore_tmp="${live_img}.restoring"
-            rm -f "$live_img" "$restore_tmp"
-
-            qemu-img convert -O qcow2 -c -o compression_type=zstd "$snap_compressed" "$restore_tmp" >> "$wlog" 2>&1 &
-            local compress_pid=$!
-            local elapsed=0
-            local success=false
-
-            while [[ $elapsed -lt 1200 ]]; do
-                if ! kill -0 "$compress_pid" 2>/dev/null; then
-                    if [[ -f "$restore_tmp" ]] && qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
-                        success=true
-                    fi
-                    break
-                fi
-                sleep 5
-                elapsed=$((elapsed + 5))
-            done
-
-            if [[ "$success" == false ]]; then
-                kill "$compress_pid" 2>/dev/null || true
-                wait "$compress_pid" 2>/dev/null || true
+            if ! qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
                 rm -f "$restore_tmp"
-                echo "[$(date '+%H:%M:%S')] Compress-back timeout/failed — copying directly from tmpfs..." >> "$wlog"
-                if ! cp "$snap_compressed" "$restore_tmp"; then
-                    echo "[$(date '+%H:%M:%S')] ERROR: Direct copy also failed" >> "$wlog"
-                    return 1
-                fi
-                if ! qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
-                    rm -f "$restore_tmp"
-                    echo "[$(date '+%H:%M:%S')] ERROR: Direct copy verification failed" >> "$wlog"
-                    return 1
-                fi
+                echo "[$(date '+%H:%M:%S')] ERROR: Direct copy verification failed" >> "$wlog"
+                return 1
             fi
+        fi
 
-            mv "$restore_tmp" "$live_img"
-            echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$wlog"
+        mv "$restore_tmp" "$live_img"
+        echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$wlog"
 
-            # Step 4 — Clear tmpfs
-            echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$wlog"
-            rm -rf "${_SNAPSHOT_DIR:?}"/*
+        # Step 4 — Clear tmpfs
+        echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$wlog"
+        rm -rf "${_SNAPSHOT_DIR:?}"/*
+    fi
 
             # Step 5 — Restart VM
             echo "[$(date '+%H:%M:%S')] Step 5: Restarting VM..." >> "$wlog"
@@ -970,17 +967,42 @@ REMOTE
 
         sleep 120  # grace period during boot
 
-        while true; do
-            sleep 20
+while true; do
+    sleep 20
 
-            [[ ! -f "$_BACKUP_DIR/$vm_name.pid" ]] && exit 0
+    [[ ! -f "$_BACKUP_DIR/$vm_name.pid" ]] && {
+        echo "[$(date '+%H:%M:%S')] PID file missing — restarting..." >> "$watchdog_log"
+        if [[ $recovery_count -ge $max_recoveries ]]; then
+            echo "[$(date '+%H:%M:%S')] Max recoveries reached. Stopping." >> "$watchdog_log"
+            exit 1
+        fi
+        ((recovery_count++))
+        recover_local "$vm_name" "true"
+        continue
+    }
 
-            local pid
-            pid=$(cat "$_BACKUP_DIR/$vm_name.pid" 2>/dev/null) || exit 0
-            if ! kill -0 "$pid" 2>/dev/null; then
-                echo "[$(date '+%H:%M:%S')] QEMU process died" >> "$watchdog_log"
-                exit 0
-            fi
+    local pid
+    pid=$(cat "$_BACKUP_DIR/$vm_name.pid" 2>/dev/null) || {
+        echo "[$(date '+%H:%M:%S')] Could not read PID file — restarting..." >> "$watchdog_log"
+        if [[ $recovery_count -ge $max_recoveries ]]; then
+            echo "[$(date '+%H:%M:%S')] Max recoveries reached. Stopping." >> "$watchdog_log"
+            exit 1
+        fi
+        ((recovery_count++))
+        recover_local "$vm_name" "true"
+        continue
+    }
+
+if ! kill -0 "$pid" 2>/dev/null; then
+    echo "[$(date '+%H:%M:%S')] QEMU process died — restarting..." >> "$watchdog_log"
+    if [[ $recovery_count -ge $max_recoveries ]]; then
+        echo "[$(date '+%H:%M:%S')] Max recoveries reached. Stopping." >> "$watchdog_log"
+        exit 1
+    fi
+    ((recovery_count++))
+    recover_local "$vm_name" "true"
+    continue
+fi
 
             if ! check_ssh_local "$_SSH_PORT"; then
                 local stale=0

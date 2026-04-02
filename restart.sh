@@ -361,19 +361,36 @@ echo -e "${CYAN}[8/8] Clearing Panel cache...${NC}"
 
 if [ -d "/var/www/pelican" ]; then
     cd /var/www/pelican
-    # In [8/8] cache clear, use the detected PHP_VERSION
     PHP_BIN="/usr/bin/php${PHP_VERSION}"
     [ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php)
-# Replace this line in [8/8]:
-    $PHP_BIN artisan config:clear >/dev/null 2>&1 || true
+
+    # Clear all caches
     $PHP_BIN artisan cache:clear >/dev/null 2>&1 || true
-    $PHP_BIN artisan view:clear >/dev/null 2>&1 || true
+    $PHP_BIN artisan config:clear >/dev/null 2>&1 || true
     $PHP_BIN artisan route:clear >/dev/null 2>&1 || true
+    $PHP_BIN artisan view:clear >/dev/null 2>&1 || true
+    $PHP_BIN artisan event:clear >/dev/null 2>&1 || true
+    $PHP_BIN artisan optimize:clear >/dev/null 2>&1 || true
     $PHP_BIN artisan queue:restart >/dev/null 2>&1 || true
-    rm -rf storage/framework/views/* storage/framework/cache/* 2>/dev/null || true
-    # FIX: correct redis flush command (was malformed in v9.0)
-    redis-cli FLUSHDB >/dev/null 2>&1 || true
-    echo -e "${GREEN}   ✓ Cache cleared${NC}"
+    rm -rf storage/framework/views/* 2>/dev/null || true
+    rm -rf storage/framework/cache/* 2>/dev/null || true
+    rm -rf storage/framework/sessions/* 2>/dev/null || true
+    rm -rf bootstrap/cache/* 2>/dev/null || true
+    redis-cli FLUSHALL >/dev/null 2>&1 || true
+
+    # Rebuild safe caches
+    $PHP_BIN artisan view:cache >/dev/null 2>&1 || true
+    $PHP_BIN artisan event:cache >/dev/null 2>&1 || true
+
+    echo -e "${GREEN}   ✓ Cache cleared and rebuilt${NC}"
+
+    # Pre-warm PHP-FPM workers
+    echo -e "${CYAN}   Pre-warming PHP-FPM workers...${NC}"
+    for i in {1..30}; do
+        curl -sk https://localhost:8443/login -o /dev/null &
+    done
+    wait
+    echo -e "${GREEN}   ✓ PHP-FPM workers warmed${NC}"
 fi
 
 # ============================================================================
