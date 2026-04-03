@@ -886,7 +886,7 @@ start_freeze_watchdog() {
             qcmd+=" -device virtio-blk-pci,drive=hd0,iothread=io0"
             qcmd+=" -drive file=$_BACKUP_DIR/$vm-seed.iso,format=raw,if=virtio,cache=writeback"
             qcmd+=" -boot order=c"
-            qcmd+=" -device virtio-net-pci,netdev=n0,rx_queue_size=1024,tx_queue_size=1024,romfile="
+            qcmd+=" -device virtio-net-pci,netdev=n0,rx_queue_size=256,tx_queue_size=256,romfile=,host_mtu=1500"
             qcmd+=" -netdev user,id=n0,hostfwd=tcp::${_SSH_PORT}-:22,dns=8.8.8.8${pf_extra}"
             qcmd+=" -object rng-random,filename=/dev/urandom,id=rng0"
             qcmd+=" -device virtio-rng-pci,rng=rng0"
