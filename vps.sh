@@ -908,18 +908,71 @@ start_freeze_watchdog() {
                 if check_ssh_local "$_SSH_PORT"; then
                     echo "[$(date '+%H:%M:%S')] SSH ready — post-recovery setup..." >> "$wlog"
                     sleep 10
+echo "[$(date '+%H:%M:%S')] SSH ready — running full post-boot setup..." >> "$wlog"
+                    sleep 10
+
+                    # ---- User fixes (BBR, docker, journald, tailscale, sshx, pelican) ----
                     sshpass -p "$_PASSWORD" ssh \
                         -o StrictHostKeyChecking=no \
                         -o UserKnownHostsFile=/dev/null \
                         -o ConnectTimeout=15 \
                         -o LogLevel=ERROR \
                         -p "$_SSH_PORT" "${_USERNAME}@localhost" bash <<REMOTE >> "$wlog" 2>&1
+set -e
+
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/no-freeze.conf > /dev/null <<'JF'
+[Journal]
+Storage=volatile
+SyncIntervalSec=0
+RateLimitBurst=0
+JF
+sudo systemctl restart systemd-journald || true
+
+if command -v docker &>/dev/null; then
+    sudo mkdir -p /etc/docker
+    sudo tee /etc/docker/daemon.json > /dev/null <<'DF'
+{
+  "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4"],
+  "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
+  "mtu": 1280,
+  "log-driver": "json-file",
+  "log-opts": {"max-size": "10m", "max-file": "3"},
+  "live-restore": true,
+  "iptables": true,
+  "ip-forward": true,
+  "ip-masq": true,
+  "storage-driver": "overlay2",
+  "default-ulimits": {
+    "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
+  }
+}
+DF
+    sudo systemctl restart docker || true
+fi
+
+sudo tee /etc/sysctl.d/99-network-perf.conf > /dev/null <<'SYSCTL'
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_rmem=4096 87380 134217728
+net.ipv4.tcp_wmem=4096 65536 134217728
+net.core.netdev_max_backlog=300000
+net.core.somaxconn=65535
+net.ipv4.tcp_congestion_control=bbr
+net.core.default_qdisc=fq
+net.ipv4.tcp_fastopen=3
+net.ipv4.ip_forward=1
+net.bridge.bridge-nf-call-iptables=1
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=15
+SYSCTL
 sudo modprobe tcp_bbr 2>/dev/null || true
-sudo sysctl -w net.ipv4.tcp_congestion_control=bbr 2>/dev/null || true
-sudo sysctl -w net.core.default_qdisc=fq 2>/dev/null || true
-sudo tailscale up || true
-sudo systemctl stop sshx || true
-sudo systemctl disable sshx || true
+sudo sysctl -p /etc/sysctl.d/99-network-perf.conf 2>/dev/null || true
+
+sudo tailscale up 2>/dev/null || true
+
+sudo systemctl stop sshx 2>/dev/null || true
+sudo systemctl disable sshx 2>/dev/null || true
 sudo tee /etc/systemd/system/sshx.service > /dev/null <<'SF'
 [Unit]
 Description=sshx terminal sharing
@@ -943,13 +996,127 @@ sudo systemctl restart sshx
 sleep 4
 SSHX_LINK=\$(sudo journalctl -u sshx -n 10 --no-pager 2>/dev/null | grep -o 'https://sshx.io/s/[^ ]*' | tail -1)
 echo "sshx: \$SSHX_LINK"
+
 sleep 5
 BASE_URL="https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main"
 if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
     curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh \
-        && sudo bash /tmp/nexus-restart.sh && rm -f /tmp/nexus-restart.sh
+        && sudo bash /tmp/nexus-restart.sh \
+        && rm -f /tmp/nexus-restart.sh
+    sudo systemctl restart php8.3-fpm || true
+    sudo systemctl restart cloudflared || true
+    cd /var/www/pelican && sudo php artisan cache:clear && sudo php artisan config:clear || true
 fi
 REMOTE
+
+                    # ---- Root fixes (VNC + websockify + Firefox) ----
+                    sshpass -p "$_PASSWORD" ssh \
+                        -o StrictHostKeyChecking=no \
+                        -o UserKnownHostsFile=/dev/null \
+                        -o ConnectTimeout=15 \
+                        -o LogLevel=ERROR \
+                        -p "$_SSH_PORT" "root@localhost" bash <<REMOTE >> "$wlog" 2>&1
+set -e
+
+FIREFOX_PROFILE=\$(find /root/.config/mozilla/firefox -maxdepth 1 -name "*.default-release" -type d 2>/dev/null | head -1)
+if [[ -n "\$FIREFOX_PROFILE" ]]; then
+    cat > "\$FIREFOX_PROFILE/user.js" <<'USERJS'
+user_pref("browser.startup.page", 3);
+user_pref("browser.sessionstore.resume_from_crash", true);
+user_pref("browser.sessionstore.max_resumed_crashes", -1);
+user_pref("browser.sessionstore.resume_session_once", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);
+USERJS
+fi
+
+mkdir -p /root/.vnc
+echo "$_PASSWORD" | vncpasswd -f > /root/.vnc/passwd
+chmod 600 /root/.vnc/passwd
+
+cat > /root/.vnc/xstartup <<'XSTART'
+#!/bin/bash
+xrdb \$HOME/.Xresources 2>/dev/null || true
+startxfce4 &
+XSTART
+chmod +x /root/.vnc/xstartup
+
+tee /etc/systemd/system/vncserver.service > /dev/null <<'VNCSVC'
+[Unit]
+Description=TightVNC Server
+After=network.target
+After=systemd-user-sessions.service
+
+[Service]
+Type=forking
+User=root
+WorkingDirectory=/root
+PIDFile=/root/.vnc/%H:1.pid
+ExecStartPre=-/usr/bin/vncserver -kill :1 2>/dev/null
+ExecStartPre=/bin/sleep 1
+ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 24
+ExecStop=/usr/bin/vncserver -kill :1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+VNCSVC
+
+tee /etc/systemd/system/websockify.service > /dev/null <<'WEBSVC'
+[Unit]
+Description=WebSockify noVNC proxy
+After=network.target
+After=vncserver.service
+Requires=vncserver.service
+
+[Service]
+Type=simple
+User=root
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc/ 6080 localhost:5901
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+WEBSVC
+
+tee /etc/systemd/system/firefox-vnc.service > /dev/null <<'FFVSVC'
+[Unit]
+Description=Firefox on VNC display
+After=network.target
+After=websockify.service
+After=vncserver.service
+Requires=vncserver.service
+
+[Service]
+Type=simple
+User=root
+Environment=DISPLAY=:1
+Environment=HOME=/root
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/firefox --display=:1
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+FFVSVC
+
+systemctl daemon-reload
+systemctl enable vncserver websockify firefox-vnc
+systemctl stop vncserver websockify firefox-vnc 2>/dev/null || true
+sleep 2
+systemctl start vncserver
+sleep 3
+systemctl start websockify
+sleep 5
+systemctl start firefox-vnc
+echo "VNC + websockify + Firefox services started"
+REMOTE
+
                     echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY COMPLETE =====" >> "$wlog"
                     return 0
                 fi
