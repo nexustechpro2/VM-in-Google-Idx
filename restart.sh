@@ -383,14 +383,6 @@ if [ -d "/var/www/pelican" ]; then
     $PHP_BIN artisan event:cache >/dev/null 2>&1 || true
 
     echo -e "${GREEN}   ✓ Cache cleared and rebuilt${NC}"
-
-    # Pre-warm PHP-FPM workers
-    echo -e "${CYAN}   Pre-warming PHP-FPM workers...${NC}"
-    for i in {1..30}; do
-        curl -sk https://localhost:8443/login -o /dev/null &
-    done
-    wait
-    echo -e "${GREEN}   ✓ PHP-FPM workers warmed${NC}"
 fi
 
 # ============================================================================
