@@ -294,9 +294,9 @@ if command -v docker &>/dev/null; then
     sudo mkdir -p /etc/docker
     sudo tee /etc/docker/daemon.json > /dev/null <<'DF'
 {
-  "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4"],
-  "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
-  "mtu": 1280,
+"dns": ["172.18.0.1"],
+"dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
+"mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
   "live-restore": true,
@@ -696,10 +696,13 @@ freeze_recovery() {
     # Step 5 — Restart VM
     echo "[$(date '+%H:%M:%S')] Step 5: Restarting VM..." >> "$watchdog_log"
     rm -f "$serial_log"
-    if ! build_and_run_qemu "$vm_name"; then
-        echo "[$(date '+%H:%M:%S')] ERROR: Failed to restart VM" >> "$watchdog_log"
-        return 1
-    fi
+build_and_run_qemu "$vm_name"
+sleep 3
+if [[ ! -f "$BACKUP_DIR/$vm_name.pid" ]] || ! kill -0 "$(cat "$BACKUP_DIR/$vm_name.pid" 2>/dev/null)" 2>/dev/null; then
+    echo "[$(date '+%H:%M:%S')] ERROR: QEMU daemonized but process is dead — check serial log" >> "$watchdog_log"
+    return 1
+fi
+echo "[$(date '+%H:%M:%S')] VM process alive (PID $(cat "$BACKUP_DIR/$vm_name.pid"))" >> "$watchdog_log"
 
     # Step 6 — Wait for SSH
     local el=0
@@ -897,10 +900,16 @@ start_freeze_watchdog() {
             qcmd+=" -display none -daemonize"
             qcmd+=" -pidfile $_BACKUP_DIR/$vm.pid"
 
-            if ! eval "$qcmd" >> "$wlog" 2>&1; then
-                echo "[$(date '+%H:%M:%S')] ERROR: Restart failed" >> "$wlog"
-                return 1
-            fi
+# FIXED — verify the pidfile was actually created
+eval "$qcmd" >> "$wlog" 2>&1
+sleep 3
+if [[ ! -f "$_BACKUP_DIR/$vm.pid" ]] || ! kill -0 "$(cat "$_BACKUP_DIR/$vm.pid" 2>/dev/null)" 2>/dev/null; then
+    echo "[$(date '+%H:%M:%S')] ERROR: QEMU failed to start — pidfile missing or process dead" >> "$wlog"
+    echo "[$(date '+%H:%M:%S')] Last QEMU output:" >> "$wlog"
+    tail -5 "$wlog" >> "$wlog" 2>/dev/null || true
+    return 1
+fi
+echo "[$(date '+%H:%M:%S')] VM process confirmed alive (PID $(cat "$_BACKUP_DIR/$vm.pid"))" >> "$wlog"
 
             # Step 6 — Wait for SSH then post-recovery
             local el=0
@@ -933,9 +942,9 @@ if command -v docker &>/dev/null; then
     sudo mkdir -p /etc/docker
     sudo tee /etc/docker/daemon.json > /dev/null <<'DF'
 {
-  "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4"],
-  "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
-  "mtu": 1280,
+"dns": ["172.18.0.1"],
+"dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
+"mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
   "live-restore": true,
@@ -1296,9 +1305,9 @@ write_files:
   - path: /etc/docker/daemon.json
     content: |
       {
-        "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4"],
-        "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
-        "mtu": 1420,
+"dns": ["172.18.0.1"],
+"dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
+"mtu": 1280,
         "log-driver": "json-file",
         "log-opts": {"max-size": "10m", "max-file": "3"},
         "live-restore": true,

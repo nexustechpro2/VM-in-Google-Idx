@@ -89,9 +89,9 @@ else
     # Ensure correct daemon.json (DNS fix for containers)
 cat > /etc/docker/daemon.json <<'DOCKEREOF'
 {
-  "dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4"],
-  "dns-opts": ["ndots:0", "timeout:3", "attempts:5"],
-  "mtu": 1420,
+"dns": ["172.18.0.1"],
+"dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
+"mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
   "live-restore": true,
@@ -133,7 +133,7 @@ DOCKEREOF
         echo -e "${RED}   ✗ Docker failed to start - check: journalctl -u docker or /var/log/docker.log${NC}"
     fi
 fi
-
+systemctl restart dnsmasq
 # ============================================================================
 # 2. START REDIS
 # ============================================================================

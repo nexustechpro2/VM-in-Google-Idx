@@ -860,6 +860,21 @@ options timeout:2 attempts:2 rotate
 DNSEOF
 chattr +i /etc/resolv.conf
 
+# Install dnsmasq for container DNS over TCP
+apt install dnsmasq -y
+cat > /etc/dnsmasq.conf <<'EOF'
+listen-address=127.0.0.1,172.18.0.1
+bind-interfaces
+server=1.1.1.1
+server=8.8.8.8
+no-resolv
+cache-size=1000
+domain-needed
+bogus-priv
+EOF
+systemctl enable dnsmasq
+systemctl restart dnsmasq
+
 # Enable OPcache
 apt install -y php${PHP_VERSION}-opcache 2>/dev/null || true
 cat > /etc/php/${PHP_VERSION}/mods-available/opcache.ini <<OPCEOF
