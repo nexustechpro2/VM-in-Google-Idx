@@ -651,8 +651,8 @@ freeze_recovery() {
 
     # Step 3 — Compress back to /home with 20 min timeout
     echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$watchdog_log"
-    local restore_tmp="${live_img}.restoring"
-    rm -f "$live_img" "$restore_tmp"
+local restore_tmp="${live_img}.restoring"
+rm -f "$restore_tmp"
 
     qemu-img convert -O qcow2 -c -o compression_type=zstd "$snap_compressed" "$restore_tmp" >> "$watchdog_log" 2>&1 &
     local compress_pid=$!
@@ -686,7 +686,8 @@ freeze_recovery() {
         fi
     fi
 
-    mv "$restore_tmp" "$live_img"
+    rm -f "$live_img"
+mv "$restore_tmp" "$live_img"
     echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$watchdog_log"
 
     # Step 4 — Clear tmpfs
@@ -811,8 +812,8 @@ start_freeze_watchdog() {
 
         # Step 3 — Compress back to /home with 20 min timeout
         echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$wlog"
-        local restore_tmp="${live_img}.restoring"
-        rm -f "$live_img" "$restore_tmp"
+local restore_tmp="${live_img}.restoring"
+rm -f "$restore_tmp"
 
         qemu-img convert -O qcow2 -c -o compression_type=zstd "$snap_compressed" "$restore_tmp" >> "$wlog" 2>&1 &
         local compress_pid=$!
@@ -846,7 +847,8 @@ start_freeze_watchdog() {
             fi
         fi
 
-        mv "$restore_tmp" "$live_img"
+        rm -f "$live_img"
+mv "$restore_tmp" "$live_img"
         echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$wlog"
 
         # Step 4 — Clear tmpfs
