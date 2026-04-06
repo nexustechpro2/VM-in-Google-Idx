@@ -1,14 +1,11 @@
 #!/bin/bash
 
 ################################################################################
-# PELICAN AUTO-RESTART SCRIPT v9.2 PRODUCTION READY
-# Fixes from v9.1:
-#   - Fixed PHP-FPM: uses Unix socket not TCP 9000
-#   - Fixed Nginx: checks port 443 not 8443
-#   - Fixed Nginx config: preserves socket mode, never forces TCP 9000
-#   - Fixed PHP version: prefers 8.3, skips 8.5 (no OPcache)
-#   - Fixed resolv.conf: no Tailscale DNS override
-#   - Fixed status display: correct ports and socket checks
+# PELICAN AUTO-RESTART SCRIPT v9.4 PRODUCTION READY
+# Fixes from v9.3:
+#   - Added local PostgreSQL start before Docker
+#   - Added DB backup cron registration in Phase 5
+#   - Added DB backup status in status check
 ################################################################################
 
 RED='\033[0;31m'
@@ -19,7 +16,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║     Pelican Services Restart v9.2      ║${NC}"
+echo -e "${CYAN}║     Pelican Services Restart v9.4      ║${NC}"
 echo -e "${CYAN}║     Production-Safe Restart            ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
@@ -30,7 +27,6 @@ if [[ $EUID -ne 0 ]]; then
    exit $?
 fi
 
-# Find .pelican.env file
 ENV_FILE=""
 for location in \
     "$(pwd)/.pelican.env" \
@@ -61,7 +57,51 @@ fi
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
 SERVICES_STARTED=0
 
-# Lock DNS — only Cloudflare/Google DNS, no Tailscale override
+# ============================================================================
+# PHASE 0 — HARD STOP EVERYTHING FIRST
+# ============================================================================
+echo -e "${CYAN}[0/8] Stopping all services cleanly...${NC}"
+
+systemctl stop wings cloudflared pelican-watchdog supervisor cron 2>/dev/null || true
+echo -e "${GREEN}   ✓ Panel services stopped${NC}"
+
+systemctl stop nginx 2>/dev/null || true
+PHP_VER_STOP=""
+for ver in 8.3 8.4 8.2 8.1; do
+    [ -f "/usr/sbin/php-fpm${ver}" ] && PHP_VER_STOP=$ver && break
+done
+[ -n "$PHP_VER_STOP" ] && systemctl stop php${PHP_VER_STOP}-fpm 2>/dev/null || true
+systemctl stop redis-server 2>/dev/null || true
+echo -e "${GREEN}   ✓ Web stack stopped${NC}"
+
+echo -e "${YELLOW}   Stopping Docker container scopes...${NC}"
+systemctl list-units --type=scope --state=running 2>/dev/null \
+    | grep -o 'docker-[a-f0-9]*.scope' \
+    | while read scope; do
+        systemctl stop "$scope" 2>/dev/null || true
+    done
+
+systemctl stop docker.socket docker containerd 2>/dev/null || true
+sleep 2
+
+pkill -9 dockerd 2>/dev/null || true
+pkill -9 cloudflared 2>/dev/null || true
+pkill -x wings 2>/dev/null || true
+pkill -9 php-fpm 2>/dev/null || true
+pkill -9 nginx 2>/dev/null || true
+pkill -f supervisord 2>/dev/null || true
+sleep 2
+
+rm -f /var/run/docker.sock /var/run/docker.pid
+rm -f /var/run/supervisor.sock /var/run/supervisord.pid
+rm -f /tmp/pelican-backup.lock
+
+echo -e "${GREEN}   ✓ Everything stopped — clean slate${NC}"
+echo ""
+
+# ============================================================================
+# Lock DNS
+# ============================================================================
 chattr -i /etc/resolv.conf 2>/dev/null || true
 cat > /etc/resolv.conf <<'DNSEOF'
 nameserver 1.1.1.1
@@ -72,21 +112,42 @@ DNSEOF
 chattr +i /etc/resolv.conf
 
 # ============================================================================
+# 0.5. START LOCAL POSTGRESQL
+# ============================================================================
+echo -e "${CYAN}[0.5/8] Starting local PostgreSQL...${NC}"
+
+DB_HOST_VAL=$(grep "^DB_HOST=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
+DB_CONN_VAL=$(grep "^DB_CONNECTION=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
+DB_NAME_VAL=$(grep "^DB_DATABASE=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
+DB_USER_VAL=$(grep "^DB_USERNAME=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
+DB_PASS_VAL=$(grep "^DB_PASSWORD=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2-)
+
+if [ "$DB_CONN_VAL" = "pgsql" ] && \
+   { [ "$DB_HOST_VAL" = "127.0.0.1" ] || [ "$DB_HOST_VAL" = "localhost" ]; }; then
+    systemctl start postgresql 2>/dev/null || true
+    sleep 2
+    if systemctl is-active --quiet postgresql; then
+        echo -e "${GREEN}   ✓ PostgreSQL started${NC}"
+        # Refresh stats after reboot
+        PGPASSWORD="$DB_PASS_VAL" psql \
+            -h 127.0.0.1 -U "$DB_USER_VAL" -d "$DB_NAME_VAL" \
+            -c "ANALYZE;" >/dev/null 2>&1 && \
+            echo -e "${GREEN}   ✓ PostgreSQL stats refreshed${NC}" || true
+    else
+        echo -e "${RED}   ✗ PostgreSQL failed to start${NC}"
+    fi
+else
+    echo -e "${YELLOW}   ⚠ Using remote DB — skipping local PostgreSQL${NC}"
+fi
+
+# ============================================================================
 # 1. START DOCKER
 # ============================================================================
 echo -e "${CYAN}[1/8] Starting Docker...${NC}"
 
-if docker ps >/dev/null 2>&1; then
-    echo -e "${GREEN}   ✓ Docker already running${NC}"
-    ((SERVICES_STARTED++))
-else
-    echo -e "${YELLOW}   Starting Docker daemon...${NC}"
-    pkill -9 dockerd 2>/dev/null || true
-    rm -f /var/run/docker.sock /var/run/docker.pid
-    systemctl reset-failed docker 2>/dev/null || true
-    sleep 2
+systemctl reset-failed docker 2>/dev/null || true
 
-    cat > /etc/docker/daemon.json <<'DOCKEREOF'
+cat > /etc/docker/daemon.json <<'DOCKEREOF'
 {
 "dns": ["172.18.0.1"],
 "dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
@@ -104,31 +165,30 @@ else
 }
 DOCKEREOF
 
-    HAS_SYSTEMD=false
-    if [ -d /run/systemd/system ] && pidof systemd >/dev/null 2>&1; then
-        systemctl start docker 2>/dev/null && HAS_SYSTEMD=true
-    fi
+HAS_SYSTEMD=false
+if [ -d /run/systemd/system ] && pidof systemd >/dev/null 2>&1; then
+    systemctl start docker 2>/dev/null && HAS_SYSTEMD=true
+fi
 
-    if [ "$HAS_SYSTEMD" = false ]; then
-        nohup dockerd --config-file /etc/docker/daemon.json > /var/log/docker.log 2>&1 &
-    fi
+if [ "$HAS_SYSTEMD" = false ]; then
+    nohup dockerd --config-file /etc/docker/daemon.json > /var/log/docker.log 2>&1 &
+fi
 
-    echo -n "   Waiting for Docker"
-    for i in {1..20}; do
-        sleep 1
-        echo -n "."
-        if docker ps >/dev/null 2>&1; then
-            echo ""
-            echo -e "${GREEN}   ✓ Docker started${NC}"
-            ((SERVICES_STARTED++))
-            break
-        fi
-    done
-    echo ""
-
-    if ! docker ps >/dev/null 2>&1; then
-        echo -e "${RED}   ✗ Docker failed to start - check: journalctl -u docker or /var/log/docker.log${NC}"
+echo -n "   Waiting for Docker"
+for i in {1..20}; do
+    sleep 1
+    echo -n "."
+    if docker ps >/dev/null 2>&1; then
+        echo ""
+        echo -e "${GREEN}   ✓ Docker started${NC}"
+        ((SERVICES_STARTED++))
+        break
     fi
+done
+echo ""
+
+if ! docker ps >/dev/null 2>&1; then
+    echo -e "${RED}   ✗ Docker failed to start - check: journalctl -u docker or /var/log/docker.log${NC}"
 fi
 
 systemctl restart dnsmasq 2>/dev/null || true
@@ -138,28 +198,23 @@ systemctl restart dnsmasq 2>/dev/null || true
 # ============================================================================
 echo -e "${CYAN}[2/8] Starting Redis...${NC}"
 
+systemctl start redis-server 2>/dev/null || \
+service redis-server start 2>/dev/null || \
+redis-server --daemonize yes 2>/dev/null || true
+sleep 2
+
 if redis-cli ping >/dev/null 2>&1; then
-    echo -e "${GREEN}   ✓ Redis already running${NC}"
+    echo -e "${GREEN}   ✓ Redis started${NC}"
     ((SERVICES_STARTED++))
 else
-    systemctl start redis-server 2>/dev/null || \
-    service redis-server start 2>/dev/null || \
-    redis-server --daemonize yes 2>/dev/null || true
-    sleep 2
-    if redis-cli ping >/dev/null 2>&1; then
-        echo -e "${GREEN}   ✓ Redis started${NC}"
-        ((SERVICES_STARTED++))
-    else
-        echo -e "${RED}   ✗ Redis failed to start${NC}"
-    fi
+    echo -e "${RED}   ✗ Redis failed to start${NC}"
 fi
 
 # ============================================================================
-# 3. START PHP-FPM (Unix socket mode)
+# 3. START PHP-FPM
 # ============================================================================
 echo -e "${CYAN}[3/8] Starting PHP-FPM...${NC}"
 
-# Detect PHP version — prefer 8.3, skip 8.5
 PHP_VERSION=""
 for ver in 8.3 8.4 8.2 8.1; do
     if [ -f "/usr/sbin/php-fpm${ver}" ] || command -v php${ver} &>/dev/null; then
@@ -173,32 +228,23 @@ if [ -z "$PHP_VERSION" ]; then
 else
     SOCKET_PATH="/run/php/php${PHP_VERSION}-fpm.sock"
 
-    # Ensure socket mode in pool config
     if [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
         sed -i "s|^listen = .*|listen = ${SOCKET_PATH}|" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
         sed -i 's|^listen.owner = .*|listen.owner = www-data|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
         sed -i 's|^listen.group = .*|listen.group = www-data|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
     fi
 
+    systemctl enable php${PHP_VERSION}-fpm 2>/dev/null || true
+    systemctl start php${PHP_VERSION}-fpm 2>/dev/null || \
+    service php${PHP_VERSION}-fpm start 2>/dev/null || \
+    /usr/sbin/php-fpm${PHP_VERSION} -D 2>/dev/null || true
+    sleep 2
+
     if [ -S "$SOCKET_PATH" ]; then
-        echo -e "${GREEN}   ✓ PHP-FPM already running (socket: $SOCKET_PATH)${NC}"
+        echo -e "${GREEN}   ✓ PHP-FPM listening on socket: $SOCKET_PATH${NC}"
         ((SERVICES_STARTED++))
     else
-        pkill -9 php-fpm 2>/dev/null || true
-        sleep 1
-
-        systemctl enable php${PHP_VERSION}-fpm 2>/dev/null || true
-        systemctl start php${PHP_VERSION}-fpm 2>/dev/null || \
-        service php${PHP_VERSION}-fpm start 2>/dev/null || \
-        /usr/sbin/php-fpm${PHP_VERSION} -D 2>/dev/null || true
-        sleep 2
-
-        if [ -S "$SOCKET_PATH" ]; then
-            echo -e "${GREEN}   ✓ PHP-FPM listening on socket: $SOCKET_PATH${NC}"
-            ((SERVICES_STARTED++))
-        else
-            echo -e "${RED}   ✗ PHP-FPM socket not found at $SOCKET_PATH${NC}"
-        fi
+        echo -e "${RED}   ✗ PHP-FPM socket not found at $SOCKET_PATH${NC}"
     fi
 fi
 
@@ -207,40 +253,30 @@ fi
 # ============================================================================
 echo -e "${CYAN}[4/8] Starting Nginx...${NC}"
 
+if [ -f "/etc/nginx/sites-available/pelican.conf" ] && [ -n "$PHP_VERSION" ]; then
+    SOCKET_PATH="/run/php/php${PHP_VERSION}-fpm.sock"
+    if ! grep -q "fastcgi_pass unix:${SOCKET_PATH}" /etc/nginx/sites-available/pelican.conf 2>/dev/null; then
+        sed -i "s|fastcgi_pass unix:/run/php/php.*-fpm.sock;|fastcgi_pass unix:${SOCKET_PATH};|g" \
+            /etc/nginx/sites-available/pelican.conf 2>/dev/null || true
+        sed -i "s|fastcgi_pass 127.0.0.1:9000;|fastcgi_pass unix:${SOCKET_PATH};|g" \
+            /etc/nginx/sites-available/pelican.conf 2>/dev/null || true
+    fi
+fi
+
+nginx -t 2>/dev/null && {
+    systemctl start nginx 2>/dev/null || \
+    service nginx start 2>/dev/null || \
+    nginx 2>/dev/null || true
+} || {
+    echo -e "${RED}   ✗ Nginx config test failed — check /etc/nginx/sites-available/pelican.conf${NC}"
+}
+sleep 2
+
 if pgrep nginx >/dev/null && (ss -tlnp 2>/dev/null | grep -q ":443"); then
-    echo -e "${GREEN}   ✓ Nginx already running (port 443)${NC}"
+    echo -e "${GREEN}   ✓ Nginx started (port 443)${NC}"
     ((SERVICES_STARTED++))
 else
-    pkill nginx 2>/dev/null || true
-    sleep 1
-
-    # Ensure fastcgi_pass uses socket not TCP (never force TCP 9000)
-    if [ -f "/etc/nginx/sites-available/pelican.conf" ]; then
-        SOCKET_PATH="/run/php/php${PHP_VERSION}-fpm.sock"
-        # Only fix if somehow pointing to wrong socket
-        if ! grep -q "fastcgi_pass unix:${SOCKET_PATH}" /etc/nginx/sites-available/pelican.conf 2>/dev/null; then
-            sed -i "s|fastcgi_pass unix:/run/php/php.*-fpm.sock;|fastcgi_pass unix:${SOCKET_PATH};|g" \
-                /etc/nginx/sites-available/pelican.conf 2>/dev/null || true
-            sed -i "s|fastcgi_pass 127.0.0.1:9000;|fastcgi_pass unix:${SOCKET_PATH};|g" \
-                /etc/nginx/sites-available/pelican.conf 2>/dev/null || true
-        fi
-    fi
-
-    nginx -t 2>/dev/null && {
-        systemctl start nginx 2>/dev/null || \
-        service nginx start 2>/dev/null || \
-        nginx 2>/dev/null || true
-    } || {
-        echo -e "${RED}   ✗ Nginx config test failed — check /etc/nginx/sites-available/pelican.conf${NC}"
-    }
-    sleep 2
-
-    if pgrep nginx >/dev/null && (ss -tlnp 2>/dev/null | grep -q ":443"); then
-        echo -e "${GREEN}   ✓ Nginx started (port 443)${NC}"
-        ((SERVICES_STARTED++))
-    else
-        echo -e "${RED}   ✗ Nginx failed to start${NC}"
-    fi
+    echo -e "${RED}   ✗ Nginx failed to start${NC}"
 fi
 
 # ============================================================================
@@ -248,14 +284,22 @@ fi
 # ============================================================================
 echo -e "${CYAN}[5/8] Starting Cron, Supervisor & Auto-Limits...${NC}"
 
-# Cron
 service cron start 2>/dev/null || cron 2>/dev/null || true
-pgrep cron >/dev/null && echo -e "${GREEN}   ✓ Cron running${NC}" || echo -e "${RED}   ✗ Cron failed${NC}"
+pgrep cron >/dev/null && \
+    echo -e "${GREEN}   ✓ Cron running${NC}" || \
+    echo -e "${RED}   ✗ Cron failed${NC}"
 
-# Supervisor — kill zombies and clean stale files first
-pkill -f supervisord 2>/dev/null || true
-sleep 2
-rm -f /var/run/supervisor.sock /var/run/supervisord.pid
+# Register DB backup cron if not already present
+if [ -f "/usr/local/bin/pelican-db-backup.sh" ]; then
+    if ! crontab -l 2>/dev/null | grep -q "pelican-db-backup"; then
+        (crontab -l 2>/dev/null; echo "*/15 * * * * /usr/local/bin/pelican-db-backup.sh") | crontab -
+        echo -e "${GREEN}   ✓ DB backup cron registered (every 15 mins)${NC}"
+    else
+        echo -e "${GREEN}   ✓ DB backup cron already active${NC}"
+    fi
+else
+    echo -e "${YELLOW}   ⚠ DB backup script not found - skipping${NC}"
+fi
 
 systemctl start supervisor 2>/dev/null || \
 supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
@@ -263,18 +307,21 @@ sleep 3
 
 supervisorctl reread 2>/dev/null || true
 supervisorctl update 2>/dev/null || true
-supervisorctl start pelican-queue 2>/dev/null || supervisorctl restart pelican-queue 2>/dev/null || true
+supervisorctl start pelican-queue 2>/dev/null || \
+supervisorctl restart pelican-queue 2>/dev/null || true
 sleep 2
-pgrep -f "queue:work" >/dev/null && echo -e "${GREEN}   ✓ Queue worker running${NC}" || echo -e "${RED}   ✗ Queue worker failed${NC}"
+pgrep -f "queue:work" >/dev/null && \
+    echo -e "${GREEN}   ✓ Queue worker running${NC}" || \
+    echo -e "${RED}   ✗ Queue worker failed${NC}"
 
-# Auto-Limits
 if [ -f "/usr/local/bin/pelican-auto-resource-limits.sh" ]; then
     /usr/local/bin/pelican-auto-resource-limits.sh && \
         echo -e "${GREEN}   ✓ Resource limits assigned${NC}" || \
         echo -e "${YELLOW}   ⚠ Could not assign limits${NC}"
     pkill -f "pelican-auto-resource-limits-fast.sh" 2>/dev/null || true
     sleep 1
-    nohup /usr/local/bin/pelican-auto-resource-limits-fast.sh > /var/log/pelican-auto-limits-fast.log 2>&1 &
+    nohup /usr/local/bin/pelican-auto-resource-limits-fast.sh \
+        > /var/log/pelican-auto-limits-fast.log 2>&1 &
     echo -e "${GREEN}   ✓ Fast auto-limit service restarted${NC}"
 else
     echo -e "${YELLOW}   ⚠ Resource limits script not found - run plugin setup first${NC}"
@@ -282,43 +329,34 @@ fi
 ((SERVICES_STARTED++))
 
 # ============================================================================
-# 6. START WINGS (via systemd only — prevents port 8080 conflicts)
+# 6. START WINGS
 # ============================================================================
 echo -e "${CYAN}[6/8] Starting Wings...${NC}"
 
-if systemctl is-active --quiet wings; then
-    echo -e "${GREEN}   ✓ Wings already running${NC}"
-    ((SERVICES_STARTED++))
-else
-    pkill -x wings 2>/dev/null || true
-    sleep 2
-
-    if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
-        if ! docker info >/dev/null 2>&1; then
-            systemctl reset-failed docker 2>/dev/null || true
-            rm -f /var/run/docker.pid /var/run/docker.sock
-            systemctl start docker
-            sleep 5
-        fi
-        systemctl reset-failed wings 2>/dev/null || true
-        # Ensure correct Wings config values
-        sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml 2>/dev/null || true
-        sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml 2>/dev/null || true
-        sed -i 's/bind_port: 2022/bind_port: 2023/' /etc/pelican/config.yml 2>/dev/null || true
-        systemctl start wings 2>/dev/null
+if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
+    if ! docker info >/dev/null 2>&1; then
+        systemctl reset-failed docker 2>/dev/null || true
+        rm -f /var/run/docker.pid /var/run/docker.sock
+        systemctl start docker
         sleep 5
-        if systemctl is-active --quiet wings; then
-            echo -e "${GREEN}   ✓ Wings started${NC}"
-            ss -tlnp 2>/dev/null | grep -q ":8080" && \
-                echo -e "${GREEN}   ✓ Wings on port 8080${NC}" || \
-                echo -e "${YELLOW}   ⚠ Wings not on port 8080 yet${NC}"
-            ((SERVICES_STARTED++))
-        else
-            echo -e "${RED}   ✗ Wings failed - check: journalctl -u wings -n 20${NC}"
-        fi
-    else
-        echo -e "${YELLOW}   ⚠ Wings not installed${NC}"
     fi
+    systemctl reset-failed wings 2>/dev/null || true
+    sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml 2>/dev/null || true
+    sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml 2>/dev/null || true
+    sed -i 's/bind_port: 2022/bind_port: 2023/' /etc/pelican/config.yml 2>/dev/null || true
+    systemctl start wings 2>/dev/null
+    sleep 5
+    if systemctl is-active --quiet wings; then
+        echo -e "${GREEN}   ✓ Wings started${NC}"
+        ss -tlnp 2>/dev/null | grep -q ":8080" && \
+            echo -e "${GREEN}   ✓ Wings on port 8080${NC}" || \
+            echo -e "${YELLOW}   ⚠ Wings not on port 8080 yet${NC}"
+        ((SERVICES_STARTED++))
+    else
+        echo -e "${RED}   ✗ Wings failed - check: journalctl -u wings -n 20${NC}"
+    fi
+else
+    echo -e "${YELLOW}   ⚠ Wings not installed${NC}"
 fi
 
 # ============================================================================
@@ -326,25 +364,19 @@ fi
 # ============================================================================
 echo -e "${CYAN}[7/8] Starting Cloudflare Tunnels...${NC}"
 
-pkill -9 cloudflared 2>/dev/null || true
-sleep 3
-
-if pgrep cloudflared >/dev/null; then
-    pkill -9 cloudflared 2>/dev/null || true
-    sleep 2
-fi
-
 TUNNEL_COUNT=0
 
 if [ -n "${CF_TOKEN:-}" ]; then
     systemctl start cloudflared 2>/dev/null || \
-    nohup cloudflared tunnel run --token "$CF_TOKEN" > /var/log/cloudflared-panel.log 2>&1 &
+    nohup cloudflared tunnel run --token "$CF_TOKEN" \
+        > /var/log/cloudflared-panel.log 2>&1 &
     sleep 3
     ((TUNNEL_COUNT++))
 fi
 
 if [ -n "${CF_TOKEN_WINGS:-}" ]; then
-    nohup cloudflared tunnel run --token "$CF_TOKEN_WINGS" > /var/log/cloudflared-wings.log 2>&1 &
+    nohup cloudflared tunnel run --token "$CF_TOKEN_WINGS" \
+        > /var/log/cloudflared-wings.log 2>&1 &
     sleep 3
     ((TUNNEL_COUNT++))
 fi
@@ -394,7 +426,8 @@ if docker info >/dev/null 2>&1; then
         systemctl restart docker 2>/dev/null || true
         sleep 5
     fi
-    iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN \
+        -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
     echo -e "${GREEN}   ✓ Docker network health OK${NC}"
 fi
@@ -450,14 +483,33 @@ CF_COUNT=$(pgrep -c cloudflared 2>/dev/null || echo 0)
     echo -e "${GREEN}✓ Cloudflare:   Running (${CF_COUNT} process)${NC}" || \
     echo -e "${YELLOW}⚠ Cloudflare:   Not Running${NC}"
 
-PANEL_CODE=$(curl -sk https://${PANEL_DOMAIN:-localhost} -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+DB_HOST_CHECK=$(grep "^DB_HOST=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
+DB_CONN_CHECK=$(grep "^DB_CONNECTION=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
+if [ "$DB_CONN_CHECK" = "pgsql" ] && \
+   { [ "$DB_HOST_CHECK" = "127.0.0.1" ] || [ "$DB_HOST_CHECK" = "localhost" ]; }; then
+    systemctl is-active --quiet postgresql && \
+        echo -e "${GREEN}✓ PostgreSQL:   Running (local)${NC}" || \
+        echo -e "${RED}✗ PostgreSQL:   Not Running${NC}"
+fi
+
+if [ -f "/usr/local/bin/pelican-db-backup.sh" ]; then
+    LAST_SYNC=$(grep "Sync completed" /var/log/pelican-db-backup.log 2>/dev/null | tail -1)
+    [ -n "$LAST_SYNC" ] && \
+        echo -e "${GREEN}✓ DB Backup:    Active (last: $(echo $LAST_SYNC | grep -o '\[.*\]'))${NC}" || \
+        echo -e "${YELLOW}⚠ DB Backup:    Script found but never run${NC}"
+fi
+
+PANEL_CODE=$(curl -sk https://${PANEL_DOMAIN:-localhost} \
+    -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
 [ "$PANEL_CODE" = "200" ] || [ "$PANEL_CODE" = "302" ] && \
     echo -e "${GREEN}✓ Panel:        Responding (HTTP $PANEL_CODE)${NC}" || \
     echo -e "${RED}✗ Panel:        Not Responding (HTTP $PANEL_CODE)${NC}"
 
 echo ""
-[ -n "${PANEL_DOMAIN:-}" ] && echo -e "${CYAN}🌐 Panel:${NC} ${GREEN}https://${PANEL_DOMAIN}${NC}"
-[ -n "${NODE_DOMAIN:-}"  ] && echo -e "${CYAN}🌐 Wings:${NC} ${GREEN}https://${NODE_DOMAIN}${NC}"
+[ -n "${PANEL_DOMAIN:-}" ] && \
+    echo -e "${CYAN}🌐 Panel:${NC} ${GREEN}https://${PANEL_DOMAIN}${NC}"
+[ -n "${NODE_DOMAIN:-}"  ] && \
+    echo -e "${CYAN}🌐 Wings:${NC} ${GREEN}https://${NODE_DOMAIN}${NC}"
 echo ""
 echo -e "${CYAN}📝 Logs:${NC}"
 echo -e "  Wings:       ${GREEN}journalctl -u wings -f${NC}"
@@ -465,5 +517,6 @@ echo -e "  Panel:       ${GREEN}tail -f /var/log/nginx/pelican.app-error.log${NC
 echo -e "  Docker:      ${GREEN}journalctl -u docker -f${NC}"
 echo -e "  Queue:       ${GREEN}supervisorctl tail -f pelican-queue${NC}"
 echo -e "  Auto-Limits: ${GREEN}tail -f /var/log/pelican-auto-limits-fast.log${NC}"
+echo -e "  DB Backup:   ${GREEN}tail -f /var/log/pelican-db-backup.log${NC}"
 echo ""
-echo "restart.sh v9.2"
+echo "restart.sh v9.4"
