@@ -3,9 +3,13 @@
 ################################################################################
 # PELICAN AUTO-RESTART SCRIPT v9.4 PRODUCTION READY
 # Fixes from v9.3:
-#   - Added local PostgreSQL start before Docker
+#   - CRITICAL: Removed sed lines that overwrote Wings port 8080 on every restart
+#   - CRITICAL: Added Wings port 8080 wait loop before starting Cloudflare
+#   - MINOR: Added Redis retry on first-boot failure
+#   - Added local PostgreSQL start before Docker (step 0.5)
 #   - Added DB backup cron registration in Phase 5
 #   - Added DB backup status in status check
+#   - Added backup lock file cleanup in Phase 0
 ################################################################################
 
 RED='\033[0;31m'
@@ -27,6 +31,7 @@ if [[ $EUID -ne 0 ]]; then
    exit $?
 fi
 
+# Find .pelican.env file
 ENV_FILE=""
 for location in \
     "$(pwd)/.pelican.env" \
@@ -62,9 +67,11 @@ SERVICES_STARTED=0
 # ============================================================================
 echo -e "${CYAN}[0/8] Stopping all services cleanly...${NC}"
 
+# Stop all high-level services first
 systemctl stop wings cloudflared pelican-watchdog supervisor cron 2>/dev/null || true
 echo -e "${GREEN}   ✓ Panel services stopped${NC}"
 
+# Stop web stack
 systemctl stop nginx 2>/dev/null || true
 PHP_VER_STOP=""
 for ver in 8.3 8.4 8.2 8.1; do
@@ -74,6 +81,7 @@ done
 systemctl stop redis-server 2>/dev/null || true
 echo -e "${GREEN}   ✓ Web stack stopped${NC}"
 
+# Stop all Docker scoped unit slices (game server containers)
 echo -e "${YELLOW}   Stopping Docker container scopes...${NC}"
 systemctl list-units --type=scope --state=running 2>/dev/null \
     | grep -o 'docker-[a-f0-9]*.scope' \
@@ -81,9 +89,11 @@ systemctl list-units --type=scope --state=running 2>/dev/null \
         systemctl stop "$scope" 2>/dev/null || true
     done
 
+# Stop Docker fully
 systemctl stop docker.socket docker containerd 2>/dev/null || true
 sleep 2
 
+# Force kill anything still alive
 pkill -9 dockerd 2>/dev/null || true
 pkill -9 cloudflared 2>/dev/null || true
 pkill -x wings 2>/dev/null || true
@@ -92,6 +102,7 @@ pkill -9 nginx 2>/dev/null || true
 pkill -f supervisord 2>/dev/null || true
 sleep 2
 
+# Clean up stale socket/pid files
 rm -f /var/run/docker.sock /var/run/docker.pid
 rm -f /var/run/supervisor.sock /var/run/supervisord.pid
 rm -f /tmp/pelican-backup.lock
@@ -100,7 +111,7 @@ echo -e "${GREEN}   ✓ Everything stopped — clean slate${NC}"
 echo ""
 
 # ============================================================================
-# Lock DNS
+# Lock DNS — only Cloudflare/Google DNS, no Tailscale override
 # ============================================================================
 chattr -i /etc/resolv.conf 2>/dev/null || true
 cat > /etc/resolv.conf <<'DNSEOF'
@@ -112,7 +123,7 @@ DNSEOF
 chattr +i /etc/resolv.conf
 
 # ============================================================================
-# 0.5. START LOCAL POSTGRESQL
+# 0.5. START LOCAL POSTGRESQL (only if using local pgsql)
 # ============================================================================
 echo -e "${CYAN}[0.5/8] Starting local PostgreSQL...${NC}"
 
@@ -128,7 +139,6 @@ if [ "$DB_CONN_VAL" = "pgsql" ] && \
     sleep 2
     if systemctl is-active --quiet postgresql; then
         echo -e "${GREEN}   ✓ PostgreSQL started${NC}"
-        # Refresh stats after reboot
         PGPASSWORD="$DB_PASS_VAL" psql \
             -h 127.0.0.1 -U "$DB_USER_VAL" -d "$DB_NAME_VAL" \
             -c "ANALYZE;" >/dev/null 2>&1 && \
@@ -137,7 +147,7 @@ if [ "$DB_CONN_VAL" = "pgsql" ] && \
         echo -e "${RED}   ✗ PostgreSQL failed to start${NC}"
     fi
 else
-    echo -e "${YELLOW}   ⚠ Using remote DB — skipping local PostgreSQL${NC}"
+    echo -e "${YELLOW}   ⚠ Using remote/non-pgsql DB — skipping local PostgreSQL${NC}"
 fi
 
 # ============================================================================
@@ -203,6 +213,13 @@ service redis-server start 2>/dev/null || \
 redis-server --daemonize yes 2>/dev/null || true
 sleep 2
 
+if ! redis-cli ping >/dev/null 2>&1; then
+    echo -e "${YELLOW}   Redis not ready yet — retrying...${NC}"
+    sleep 3
+    systemctl restart redis-server 2>/dev/null || true
+    sleep 2
+fi
+
 if redis-cli ping >/dev/null 2>&1; then
     echo -e "${GREEN}   ✓ Redis started${NC}"
     ((SERVICES_STARTED++))
@@ -211,10 +228,11 @@ else
 fi
 
 # ============================================================================
-# 3. START PHP-FPM
+# 3. START PHP-FPM (Unix socket mode)
 # ============================================================================
 echo -e "${CYAN}[3/8] Starting PHP-FPM...${NC}"
 
+# Detect PHP version — prefer 8.3, skip 8.5
 PHP_VERSION=""
 for ver in 8.3 8.4 8.2 8.1; do
     if [ -f "/usr/sbin/php-fpm${ver}" ] || command -v php${ver} &>/dev/null; then
@@ -228,6 +246,7 @@ if [ -z "$PHP_VERSION" ]; then
 else
     SOCKET_PATH="/run/php/php${PHP_VERSION}-fpm.sock"
 
+    # Ensure socket mode in pool config
     if [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
         sed -i "s|^listen = .*|listen = ${SOCKET_PATH}|" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
         sed -i 's|^listen.owner = .*|listen.owner = www-data|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
@@ -253,6 +272,7 @@ fi
 # ============================================================================
 echo -e "${CYAN}[4/8] Starting Nginx...${NC}"
 
+# Ensure fastcgi_pass uses socket not TCP (never force TCP 9000)
 if [ -f "/etc/nginx/sites-available/pelican.conf" ] && [ -n "$PHP_VERSION" ]; then
     SOCKET_PATH="/run/php/php${PHP_VERSION}-fpm.sock"
     if ! grep -q "fastcgi_pass unix:${SOCKET_PATH}" /etc/nginx/sites-available/pelican.conf 2>/dev/null; then
@@ -284,12 +304,13 @@ fi
 # ============================================================================
 echo -e "${CYAN}[5/8] Starting Cron, Supervisor & Auto-Limits...${NC}"
 
+# Cron
 service cron start 2>/dev/null || cron 2>/dev/null || true
 pgrep cron >/dev/null && \
     echo -e "${GREEN}   ✓ Cron running${NC}" || \
     echo -e "${RED}   ✗ Cron failed${NC}"
 
-# Register DB backup cron if not already present
+# Register DB backup cron if script exists and not already registered
 if [ -f "/usr/local/bin/pelican-db-backup.sh" ]; then
     if ! crontab -l 2>/dev/null | grep -q "pelican-db-backup"; then
         (crontab -l 2>/dev/null; echo "*/15 * * * * /usr/local/bin/pelican-db-backup.sh") | crontab -
@@ -301,6 +322,7 @@ else
     echo -e "${YELLOW}   ⚠ DB backup script not found - skipping${NC}"
 fi
 
+# Supervisor
 systemctl start supervisor 2>/dev/null || \
 supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
 sleep 3
@@ -314,6 +336,7 @@ pgrep -f "queue:work" >/dev/null && \
     echo -e "${GREEN}   ✓ Queue worker running${NC}" || \
     echo -e "${RED}   ✗ Queue worker failed${NC}"
 
+# Auto-Limits
 if [ -f "/usr/local/bin/pelican-auto-resource-limits.sh" ]; then
     /usr/local/bin/pelican-auto-resource-limits.sh && \
         echo -e "${GREEN}   ✓ Resource limits assigned${NC}" || \
@@ -329,11 +352,12 @@ fi
 ((SERVICES_STARTED++))
 
 # ============================================================================
-# 6. START WINGS
+# 6. START WINGS (via systemd only — prevents port 8080 conflicts)
 # ============================================================================
 echo -e "${CYAN}[6/8] Starting Wings...${NC}"
 
 if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
+    # Ensure Docker is running before Wings
     if ! docker info >/dev/null 2>&1; then
         systemctl reset-failed docker 2>/dev/null || true
         rm -f /var/run/docker.pid /var/run/docker.sock
@@ -341,11 +365,15 @@ if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
         sleep 5
     fi
     systemctl reset-failed wings 2>/dev/null || true
-    sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml 2>/dev/null || true
-    sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml 2>/dev/null || true
-    sed -i 's/bind_port: 2022/bind_port: 2023/' /etc/pelican/config.yml 2>/dev/null || true
     systemctl start wings 2>/dev/null
-    sleep 5
+
+    # Wait for Wings to actually bind on port 8080 before starting Cloudflare
+    echo -n "   Waiting for Wings on port 8080"
+    for i in {1..15}; do
+        sleep 2
+        echo -n "."
+        ss -tlnp 2>/dev/null | grep -q ":8080" && { echo ""; break; }
+    done
     if systemctl is-active --quiet wings; then
         echo -e "${GREEN}   ✓ Wings started${NC}"
         ss -tlnp 2>/dev/null | grep -q ":8080" && \
@@ -388,7 +416,7 @@ fi
 systemctl start pelican-watchdog 2>/dev/null || true
 
 # ============================================================================
-# 8. CLEAR PANEL CACHE
+# 8. CLEAR PANEL CACHE + LOCAL POSTGRESQL ANALYZE (pgsql+local only)
 # ============================================================================
 echo -e "${CYAN}[8/8] Clearing Panel cache...${NC}"
 
@@ -414,6 +442,23 @@ if [ -d "/var/www/pelican" ]; then
     $PHP_BIN artisan event:cache >/dev/null 2>&1 || true
 
     echo -e "${GREEN}   ✓ Cache cleared and rebuilt${NC}"
+
+    # Run ANALYZE on local PostgreSQL only — skips if remote/mysql/sqlite
+    DB_HOST_VAL=$(grep "^DB_HOST=" .env 2>/dev/null | cut -d'=' -f2)
+    DB_DRIVER_VAL=$(grep "^DB_CONNECTION=" .env 2>/dev/null | cut -d'=' -f2)
+    DB_NAME_VAL=$(grep "^DB_DATABASE=" .env 2>/dev/null | cut -d'=' -f2)
+    DB_USER_VAL=$(grep "^DB_USERNAME=" .env 2>/dev/null | cut -d'=' -f2)
+    DB_PASS_VAL=$(grep "^DB_PASSWORD=" .env 2>/dev/null | cut -d'=' -f2-)
+
+    if [ "$DB_DRIVER_VAL" = "pgsql" ] && \
+       { [ "$DB_HOST_VAL" = "127.0.0.1" ] || [ "$DB_HOST_VAL" = "localhost" ]; }; then
+        echo -e "${YELLOW}   Running ANALYZE on local PostgreSQL...${NC}"
+        PGPASSWORD="$DB_PASS_VAL" psql \
+            -h 127.0.0.1 -U "$DB_USER_VAL" -d "$DB_NAME_VAL" \
+            -c "ANALYZE;" >/dev/null 2>&1 && \
+            echo -e "${GREEN}   ✓ PostgreSQL stats refreshed${NC}" || \
+            echo -e "${YELLOW}   ⚠ ANALYZE skipped (local PostgreSQL not reachable)${NC}"
+    fi
 fi
 
 # ============================================================================
@@ -483,6 +528,7 @@ CF_COUNT=$(pgrep -c cloudflared 2>/dev/null || echo 0)
     echo -e "${GREEN}✓ Cloudflare:   Running (${CF_COUNT} process)${NC}" || \
     echo -e "${YELLOW}⚠ Cloudflare:   Not Running${NC}"
 
+# Show PostgreSQL status only if using local pgsql
 DB_HOST_CHECK=$(grep "^DB_HOST=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
 DB_CONN_CHECK=$(grep "^DB_CONNECTION=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
 if [ "$DB_CONN_CHECK" = "pgsql" ] && \
@@ -495,7 +541,7 @@ fi
 if [ -f "/usr/local/bin/pelican-db-backup.sh" ]; then
     LAST_SYNC=$(grep "Sync completed" /var/log/pelican-db-backup.log 2>/dev/null | tail -1)
     [ -n "$LAST_SYNC" ] && \
-        echo -e "${GREEN}✓ DB Backup:    Active (last: $(echo $LAST_SYNC | grep -o '\[.*\]'))${NC}" || \
+        echo -e "${GREEN}✓ DB Backup:    Active (last: $(echo "$LAST_SYNC" | grep -o '\[.*\]'))${NC}" || \
         echo -e "${YELLOW}⚠ DB Backup:    Script found but never run${NC}"
 fi
 
