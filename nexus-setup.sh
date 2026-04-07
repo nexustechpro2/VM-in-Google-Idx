@@ -160,12 +160,12 @@ if [ -n "$TAILSCALE_IP" ]; then
     print_success "Tailscale IP: $TAILSCALE_IP"
 fi
 
-# NOW lock DNS — Tailscale already connected, preserve its DNS
+# NOW lock DNS — no Tailscale DNS override, only Cloudflare/Google
 chattr -i /etc/resolv.conf 2>/dev/null || true
 cat > /etc/resolv.conf <<'DNSEOF'
-nameserver 100.100.100.100
 nameserver 1.1.1.1
 nameserver 8.8.8.8
+nameserver 8.8.4.4
 options timeout:2 attempts:2 rotate
 DNSEOF
 chattr +i /etc/resolv.conf
@@ -215,6 +215,105 @@ systemctl disable packagekit
 print_success "Freeze-causing services disabled!"
 
 # ============================================================
+# STEP 8 — INSTALL VNC + noVNC DESKTOP (for IDX Keepalive)
+# ============================================================
+print_step "Installing VNC desktop + noVNC (for 24/7 IDX keepalive)..."
+
+apt install -y xfce4 xfce4-goodies tightvncserver novnc websockify
+
+# Set up VNC xstartup
+mkdir -p /root/.vnc
+cat > /root/.vnc/xstartup << 'EOF'
+#!/bin/bash
+xrdb $HOME/.Xresources 2>/dev/null || true
+startxfce4 &
+EOF
+chmod +x /root/.vnc/xstartup
+
+# Set VNC password interactively
+print_warning "You will now set a VNC password — use your root password."
+print_warning "When asked 'Would you like a view-only password?' — type: n"
+vncpasswd
+
+# Start VNC server
+vncserver -kill :1 2>/dev/null || true
+vncserver :1 -geometry 1280x720 -depth 24
+
+# Install VNC as a systemd service
+tee /etc/systemd/system/vncserver.service > /dev/null << 'VNCSVC'
+[Unit]
+Description=TightVNC Server
+After=network.target
+
+[Service]
+Type=forking
+User=root
+WorkingDirectory=/root
+PIDFile=/root/.vnc/%H:1.pid
+ExecStartPre=-/usr/bin/vncserver -kill :1 2>/dev/null
+ExecStartPre=/bin/sleep 1
+ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 24
+ExecStop=/usr/bin/vncserver -kill :1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+VNCSVC
+
+# Install websockify as a systemd service
+tee /etc/systemd/system/websockify.service > /dev/null << 'WEBSVC'
+[Unit]
+Description=WebSockify noVNC proxy
+After=network.target vncserver.service
+Requires=vncserver.service
+
+[Service]
+Type=simple
+User=root
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc/ 6080 localhost:5901
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+WEBSVC
+
+# Install Firefox VNC service (for keepalive)
+tee /etc/systemd/system/firefox-vnc.service > /dev/null << 'FFVSVC'
+[Unit]
+Description=Firefox on VNC display for IDX keepalive
+After=network.target websockify.service vncserver.service
+Requires=vncserver.service
+
+[Service]
+Type=simple
+User=root
+Environment=DISPLAY=:1
+Environment=HOME=/root
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/firefox --display=:1
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+FFVSVC
+
+systemctl daemon-reload
+systemctl enable vncserver websockify firefox-vnc
+systemctl start vncserver
+sleep 3
+systemctl start websockify
+sleep 5
+systemctl start firefox-vnc
+
+TAILSCALE_IP=$(tailscale ip -4 2>/dev/null)
+print_success "VNC desktop installed and running!"
+print_warning "Access your desktop at: http://${TAILSCALE_IP:-YOUR_TAILSCALE_IP}:6080/vnc.html"
+
+# ============================================================
 # FINAL SUMMARY
 # ============================================================
 TAILSCALE_IP=$(tailscale ip -4 2>/dev/null)
@@ -226,14 +325,23 @@ echo -e "${CYAN}============================================================${NC
 echo ""
 echo -e "${GREEN}SSH:${NC}       ssh root@${TAILSCALE_IP:-YOUR_TAILSCALE_IP}"
 echo -e "${GREEN}RDP:${NC}       mstsc → ${TAILSCALE_IP:-YOUR_TAILSCALE_IP} (port 3389)"
+echo -e "${GREEN}VNC:${NC}       http://${TAILSCALE_IP:-YOUR_TAILSCALE_IP}:6080/vnc.html"
 echo -e "${GREEN}Tailscale:${NC} ${TAILSCALE_IP:-Run 'tailscale up' to get IP}"
 echo ""
 echo -e "${YELLOW}Services running:${NC}"
 echo "  ✅ SSH (port 22)"
-echo "  ✅ xrdp (port 3389) - Resolution 1280x720"
+echo "  ✅ xrdp (port 3389)"
+echo "  ✅ VNC desktop (port 5901)"
+echo "  ✅ noVNC browser access (port 6080)"
+echo "  ✅ Firefox on VNC (for IDX keepalive)"
 echo "  ✅ sshx (single instance, auto-restart)"
 echo "  ✅ Tailscale (secure tunnel)"
-echo "  ✅ Firefox (launch with: DISPLAY=:10 firefox &)"
+echo ""
+echo -e "${CYAN}📌 IDX Keepalive Instructions:${NC}"
+echo -e "  1. Open: ${GREEN}http://${TAILSCALE_IP:-YOUR_TAILSCALE_IP}:6080/vnc.html${NC}"
+echo -e "  2. Inside VNC Firefox → open idx.google.com"
+echo -e "  3. Install Auto Refresh extension → set to 5 minutes"
+echo -e "  4. Close the noVNC tab on your PC (do NOT close Firefox inside VNC)"
 echo ""
 echo -e "${YELLOW}sshx Link:${NC}"
 sleep 4

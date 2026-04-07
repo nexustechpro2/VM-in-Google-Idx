@@ -14,7 +14,7 @@
 4. [Quick Start](#quick-start)
 5. [Part 1 — Ubuntu VPS on Google IDX](#part-1--ubuntu-vps-on-google-idx)
 6. [Part 2 — Server Setup (SSH + RDP + Tailscale)](#part-2--server-setup-ssh--rdp--tailscale)
-7. [Part 3 — 24/7 Keepalive Guide](#part-3--247-keepalive-guide)
+7. [Part 3 — VNC Desktop + 24/7 Keepalive Guide](#part-3--vnc-desktop--247-keepalive-guide)
 8. [Part 4 — Pelican Panel Installation](#part-4--pelican-panel-installation)
 9. [Part 5 — Pelican Wings Installation](#part-5--pelican-wings-installation)
 10. [Part 6 — Cloudflare Tunnel Setup](#part-6--cloudflare-tunnel-setup)
@@ -35,7 +35,7 @@ This repository provides everything needed to run a full **Pelican Panel game se
 - 🐦 **Pelican Panel** — Game server management panel
 - 🔗 **Cloudflare Tunnel** — Free SSL & domain routing
 - 🌐 **Tailscale** — Secure VPN for remote access
-- 🖥️ **xRDP** — Remote desktop connection
+- 🖥️ **VNC + noVNC** — Browser-based remote desktop for keepalive
 
 ---
 
@@ -53,29 +53,30 @@ Google IDX (Ubuntu VM)
    ┌────┴────────────────────┐
    │                         │
    ▼                         ▼
-xRDP (port 3389)      Cloudflare Tunnel
-Remote Desktop              │
-                    ┌───────┴──────────┐
-                    ▼                  ▼
-          panel.nexusbot.qzz.io  node-1.nexusbot.qzz.io
-                    │                  │
-                    ▼                  ▼
-             Nginx :8443          Wings :8080
-                    │                  │
-                    ▼                  ▼
-           Pelican Panel          Docker Containers
-           (PHP/Laravel)          (Game Servers)
+noVNC (port 6080)      Cloudflare Tunnel
+Browser Desktop              │
+(Keepalive method)   ┌───────┴──────────┐
+                     ▼                  ▼
+         panel.nexusbot.qzz.io  node-1.nexusbot.qzz.io
+                     │                  │
+                     ▼                  ▼
+              Nginx :443           Wings :8080
+                     │                  │
+                     ▼                  ▼
+            Pelican Panel          Docker Containers
+            (PHP/Laravel)          (Game Servers)
 ```
 
 **Port Reference:**
 
 | Service | Internal Port | External Port |
 |---------|:---:|:---:|
-| Pelican Panel (Nginx) | 8443 | 443 (via Cloudflare) |
+| Pelican Panel (Nginx) | 443 | 443 (via Cloudflare) |
 | Wings Node | 8080 | 443 (via Cloudflare) |
-| xRDP | 3389 | Tailscale only |
+| noVNC (Keepalive) | 6080 | Tailscale only |
+| xRDP (Windows RDP) | 3389 | Tailscale only |
 | SSH | 22 | Tailscale only |
-| Wings SFTP | 2022 | Internal |
+| Wings SFTP | 2023 | Internal |
 
 ---
 
@@ -88,7 +89,6 @@ Before starting, you need:
 - ✅ **Domain on Cloudflare** — any domain managed by Cloudflare
 - ✅ **Supabase / PostgreSQL** — free database at [supabase.com](https://supabase.com)
 - ✅ **Tailscale Account** — free at [tailscale.com](https://tailscale.com)
-- ✅ **Windows PC** — for Remote Desktop Connection
 
 **Subdomains needed:**
 ```
@@ -103,7 +103,6 @@ node-1.yourdomain.com    → Wings Node
 ### Run the NexusBot Menu:
 
 ```bash
-# On your Ubuntu server inside IDX:
 curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/main.sh | bash
 ```
 
@@ -175,7 +174,6 @@ Save the file — IDX will rebuild the environment automatically.
 ### Step 2 — Install Ubuntu VM
 
 ```bash
-# Run the VPS installer
 bash <(curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/vps.sh)
 ```
 
@@ -193,7 +191,49 @@ After boot, SSH into it:
 ssh root@localhost -p 2222
 ```
 
-Or use the VM manager menu to connect automatically.
+### Step 4 — Set Up VNC Desktop (Required for Keepalive)
+
+After your VM is booted and you are SSH'd in, run this command to set up the VNC desktop environment. This is what you will use to keep Google IDX alive 24/7:
+
+```bash
+sudo apt install -y xfce4 xfce4-goodies tightvncserver novnc websockify
+```
+
+Then set up VNC:
+
+```bash
+vncpasswd
+```
+
+> ⚠️ **When asked for a password:** use your Ubuntu VM password.
+> When asked **"Would you like to enter a view-only password?"** — type `n` and press Enter.
+
+Then start the VNC server and desktop:
+
+```bash
+mkdir -p ~/.vnc && \
+cat > ~/.vnc/xstartup << 'EOF'
+#!/bin/bash
+xrdb $HOME/.Xresources
+startxfce4 &
+EOF
+chmod +x ~/.vnc/xstartup && \
+vncserver -kill :1 2>/dev/null || true && \
+vncserver :1 -geometry 1280x720 -depth 24
+```
+
+Then start noVNC (the browser-based viewer):
+
+```bash
+websockify --web=/usr/share/novnc/ 6080 localhost:5901 &
+```
+
+Your VNC desktop is now accessible at:
+```
+http://YOUR_TAILSCALE_IP:6080/vnc.html
+```
+
+> 💡 Get your Tailscale IP: `tailscale ip -4`
 
 ---
 
@@ -211,71 +251,88 @@ curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main
 |-----------|---------|
 | **OpenSSH** | Remote terminal access |
 | **Tailscale** | Secure VPN (access from anywhere) |
-| **xRDP + XFCE** | Full remote desktop at 1280x720 |
+| **xRDP + XFCE** | Full remote desktop (Windows RDP) |
 | **Firefox** | Browser inside remote desktop |
 | **sshx** | Terminal sharing (single instance) |
-| **Keepalive Service** | Prevents IDX from shutting down |
 
-### After setup, connect from Windows:
+### Connect from Windows via Remote Desktop:
 
 **SSH:**
 ```cmd
 ssh root@YOUR_TAILSCALE_IP
 ```
 
-**Remote Desktop:**
+**Remote Desktop (RDP):**
 ```
 Win + R → mstsc → Enter YOUR_TAILSCALE_IP → Connect
 ```
 
 > 💡 Get your Tailscale IP by running: `tailscale ip -4`
 
+> ⚠️ **Having trouble connecting via RDP?** Make sure Tailscale is installed on your Windows PC and you are logged in with the **same Tailscale account** as your VM. Without this, the connection will fail.
+
 ---
 
-## Part 3 — 24/7 Keepalive Guide
+## Part 3 — VNC Desktop + 24/7 Keepalive Guide
 
-> Google IDX shuts down after ~2 hours of inactivity. Follow these steps to keep it running 24/7.
+> Google IDX shuts down after ~2 hours of inactivity. Follow these steps to keep it running 24/7 using the **noVNC browser desktop** method.
 
-### Step 1 — Get your Tailscale IP
-```bash
-tailscale ip -4
+This method is better than the Windows RDP method because it runs fully inside your VM — even if you close your PC, the session keeps going.
+
+### Step 1 — Open Your VNC Desktop
+
+Open any browser on your PC and go to:
+```
+http://YOUR_TAILSCALE_IP:6080/vnc.html
 ```
 
-### Step 2 — Connect via Remote Desktop
-- Press `Win + R` → type `mstsc` → Enter
-- Enter your **Tailscale IP**
-- Login with your Ubuntu username and password
+Enter your VNC password when prompted. You will see a full XFCE desktop in your browser.
 
-### Step 3 — Open Firefox inside RDP
-In the RDP terminal:
-```bash
-DISPLAY=:10 firefox &
-```
+### Step 2 — Open Firefox Inside the VNC Desktop
 
-### Step 4 — Install Auto Refresh Extension
-1. In Firefox, go to the **Extensions store**
-2. Search for **"Auto Refresh Page"**
-3. Click **Add to Firefox**
+Inside the VNC desktop, open the **Firefox** browser.
 
-### Step 5 — Open Google IDX
-1. Open a new tab
+### Step 3 — Install the Auto Refresh Extension
+
+1. In Firefox, open a new tab and search for **"Auto Refresh"** in the Firefox Add-ons store:
+   ```
+   https://addons.mozilla.org/en-US/firefox/search/?q=auto+refresh
+   ```
+2. Install the **second option** in the results (Tab Auto Refresh)
+3. After installing, **pin it to the toolbar** so it's always visible
+
+### Step 4 — Open Google IDX
+
+1. Open a new tab in Firefox
 2. Go to: `https://idx.google.com`
 3. Login with your Google account
-4. Open your project
+4. Open your project — wait for it to fully load
 
-### Step 6 — Set Auto Refresh
-1. Click the **Auto Refresh** extension icon
-2. Set interval to **20 minutes**
-3. Enable it on the IDX tab
+### Step 5 — Open a Terminal in IDX
 
-### Step 7 — Open Terminal in IDX
-In the IDX terminal, run the keepalive:
-```bash
-while true; do echo "alive $(date)"; sleep 60; done
-```
+1. In the IDX interface, click the **three-dash menu** (☰) at the top left
+2. Select **Terminal → New Terminal**
+3. A terminal will open at the bottom of IDX
+
+### Step 6 — Enable Auto Refresh
+
+1. Click the **blue Auto Refresh extension icon** in the Firefox toolbar
+2. Set the interval to **5 minutes**
+3. Click **Save** / enable it for the current tab (the IDX tab)
+
+### Step 7 — Close the noVNC Tab (Do NOT Shutdown)
+
+Close the `http://YOUR_TAILSCALE_IP:6080/vnc.html` browser tab on your PC — just close the **tab**, like you would close any website. Do **not** shut down Firefox inside the VNC desktop.
+
+The Firefox inside the VNC desktop will keep running, keep refreshing IDX every 5 minutes, and keep your server alive 24/7 — even after you close your PC.
 
 ### ✅ Result
-Your server will now stay active **24/7** even after you close your PC — the RDP session running inside IDX keeps the browser active, and the auto-refresh prevents IDX timeout.
+
+Your server will now stay active **24/7**:
+- The VNC desktop runs inside the VM
+- Firefox inside VNC keeps the IDX project open
+- Auto Refresh prevents IDX from timing out
+- You can safely close your own browser or PC
 
 ---
 
@@ -308,11 +365,11 @@ curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main
 Panel domain:           panel.yourdomain.com
 Cloudflare Token:       eyJ... (from step 1)
 Database Type:          1 (PostgreSQL)
-Database Host:          aws-1-eu-west-1.pooler.supabase.com
+Database Host:          Your database host
 Database Port:          5432
-Database Name:          postgres
-Database Username:      postgres.xxxxx
-Database Password:      your_password
+Database Name:          Your database name
+Database Username:      Your database username
+Database Password:      Your database password
 Redis Host:             127.0.0.1
 Redis Port:             6379
 ```
@@ -330,11 +387,11 @@ php artisan p:user:make
 2. Fill in:
 
 ```
-Subdomain:    panel
-Domain:       yourdomain.com
-Service Type: HTTPS
-URL:          localhost:8443
-No TLS Verify: ✅ ON  ← CRITICAL!
+Subdomain:      panel
+Domain:         yourdomain.com
+Service Type:   HTTPS
+URL:            localhost:443
+No TLS Verify:  ✅ ON  ← REQUIRED!
 ```
 
 3. Save → wait 30 seconds
@@ -350,18 +407,18 @@ No TLS Verify: ✅ ON  ← CRITICAL!
 2. Fill in:
 
 ```
-Name:           Node 1
-FQDN:           node-1.yourdomain.com
-Port:           8443           ← NOT 8080!
-Communicate over SSL:     HTTPS (SSL)
-Scheme:         https
+Name:                     Node 1
+FQDN:                     node-1.yourdomain.com
+Connection Port:          443
+Communicate over SSL:     HTTPS with (reverse) proxy   ← IMPORTANT!
+Listening Port:           8080
 ```
 
 3. Save node
 
 ### Step 2 — Get API Token
 
-1. **Admin → API Keys → Create**
+1. **Admin → API Keys**
 2. Copy the token (starts with `papp_`)
 
 ### Step 3 — Install Wings
@@ -385,11 +442,11 @@ CF Token:       eyJ... (same or separate tunnel token)
 2. Fill in:
 
 ```
-Subdomain:     node-1
-Domain:        yourdomain.com
-Service Type:  HTTPS
-URL:           localhost:8080
-No TLS Verify: ✅ ON  ← CRITICAL!
+Subdomain:      node-1
+Domain:         yourdomain.com
+Service Type:   HTTP
+URL:            localhost:8080
+No TLS Verify:  ✅ ON  ← REQUIRED!
 ```
 
 ### Step 5 — Verify Connection
@@ -405,7 +462,7 @@ tail -f /tmp/wings.log
 tail -f /var/log/cloudflared-wings.log
 
 # Test Wings API
-curl -k https://localhost:8080/api/system
+curl http://localhost:8080/api/system
 ```
 
 Expected response (this is correct!):
@@ -419,16 +476,16 @@ Expected response (this is correct!):
 
 ### Summary of all tunnel routes needed:
 
-| Subdomain | Service | URL | No TLS Verify |
-|-----------|---------|-----|:---:|
-| `panel` | HTTPS | `localhost:8443` | ✅ |
-| `node-1` | HTTPS | `localhost:8080` | ✅ |
+| Subdomain | Service Type | URL | No TLS Verify |
+|-----------|:-----------:|-----|:---:|
+| `panel` | HTTPS | `localhost:443` | ✅ |
+| `node-1` | HTTP | `localhost:8080` | ✅ |
 
 ### Important Notes:
-- ❌ Never use `http://` — always `https://`
-- ❌ Never put port 443 as the service URL
-- ✅ Always enable **No TLS Verify** (self-signed certs)
-- ✅ Panel: port `8443` | Wings: port `8080`
+- ✅ Panel tunnel uses `HTTPS` — Nginx handles SSL directly on port 443
+- ✅ Wings tunnel uses `HTTP` — Wings runs plain HTTP, Cloudflare adds SSL
+- ✅ Always enable **No TLS Verify** on both routes
+- ✅ Panel node: Connection Port `443` | SSL: `HTTPS with (reverse) proxy`
 
 ---
 
@@ -444,10 +501,10 @@ curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main
 
 | Resource | Default |
 |----------|---------|
-| CPU | 200% (2 cores) |
-| RAM | 4096 MB (4GB) |
-| Disk | 10240 MB (10GB) |
-| Max Servers | 2 |
+| CPU | 200% (3 cores) |
+| RAM | 4096 MB (3GB) |
+| Disk | 10240 MB (3GB) |
+| Max Servers | 3 |
 | Max Databases | 2 |
 | Max Allocations | 3 |
 | Max Backups | 1 |
@@ -477,13 +534,9 @@ Or manually:
 # Restart individual services
 sudo systemctl restart nginx
 sudo systemctl restart php8.3-fpm
-sudo systemctl restart redis
-sudo systemctl restart xrdp
+sudo systemctl restart redis-server
+sudo systemctl restart wings
 sudo systemctl restart cloudflared
-sudo systemctl restart tailscaled
-
-# Restart Wings
-pkill wings && cd /etc/pelican && nohup wings > /tmp/wings.log 2>&1 &
 
 # Clear Panel cache
 cd /var/www/pelican
@@ -572,24 +625,35 @@ sudo systemctl restart nginx php8.3-fpm
 ### Wings node shows red heart
 ```bash
 # Check Wings is running
-ps aux | grep wings
+systemctl status wings
 
 # Check logs
 tail -30 /tmp/wings.log
 
 # Restart Wings
-pkill wings
-cd /etc/pelican
-nohup wings > /tmp/wings.log 2>&1 &
+sudo systemctl restart wings
+
+# Test Wings API
+curl http://localhost:8080/api/system
 ```
 
-### Can't connect via RDP
+### Can't connect via RDP from Windows
 ```bash
 sudo systemctl restart xrdp
-# Remove any broken locks
 sudo rm -f /tmp/.X*-lock
 sudo rm -f /tmp/.X11-unix/X*
 sudo systemctl restart xrdp
+```
+
+> ⚠️ Also make sure **Tailscale is installed and logged in on your Windows PC** with the **same account** as your VM. Without this, RDP will not connect.
+
+### noVNC page not loading
+```bash
+# Check websockify is running
+pgrep websockify || websockify --web=/usr/share/novnc/ 6080 localhost:5901 &
+
+# Check VNC server is running
+vncserver :1 -geometry 1280x720 -depth 24
 ```
 
 ### SSH connection timeout
@@ -614,10 +678,10 @@ sudo dpkg --configure -a
 ```
 
 ### IDX keeps shutting down
-- Make sure **auto-refresh extension** is active on the IDX tab
-- Set interval to **20 minutes** (not less — avoid ban)
-- Keep the **keepalive loop** running in IDX terminal
-- Use **RDP session** to keep the browser open
+- Make sure **Auto Refresh extension** is active on the IDX tab inside the VNC Firefox
+- Set interval to **5 minutes**
+- Make sure Firefox inside VNC is **not closed** — only close the noVNC browser tab on your PC
+- The VNC desktop must stay running inside the VM
 
 ---
 
@@ -636,7 +700,6 @@ sudo dpkg --configure -a
 
 ### Run any script directly:
 ```bash
-# Replace SCRIPT_NAME with the script you want
 curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main/SCRIPT_NAME.sh | bash
 ```
 
@@ -648,7 +711,7 @@ curl -fsSL https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main
 - ⚠️ Never commit secrets to GitHub
 - ✅ Always add `.pelican.env` to `.gitignore`
 - ✅ Use strong passwords for root and database
-- ✅ Tailscale ensures SSH/RDP is not exposed publicly
+- ✅ Tailscale ensures SSH/RDP/VNC is not exposed publicly
 - ✅ Cloudflare Tunnel avoids opening ports on the server
 
 ```bash
@@ -685,8 +748,13 @@ php artisan cache:clear
 tail -f storage/logs/laravel.log
 
 # Wings
+systemctl status wings
 tail -f /tmp/wings.log
-curl -k https://localhost:8080/api/system
+curl http://localhost:8080/api/system
+
+# VNC
+vncserver :1 -geometry 1280x720 -depth 24
+websockify --web=/usr/share/novnc/ 6080 localhost:5901 &
 
 # sshx link
 journalctl -u sshx -f
@@ -703,13 +771,13 @@ tailscale ip -4
 If everything is set up correctly:
 
 - ✅ Ubuntu VM running inside Google IDX
-- ✅ Remote Desktop accessible via Tailscale
-- ✅ IDX kept alive 24/7 via auto-refresh
+- ✅ VNC desktop accessible via browser at `http://TAILSCALE_IP:6080/vnc.html`
+- ✅ IDX kept alive 24/7 via Auto Refresh in VNC Firefox
 - ✅ Pelican Panel accessible at `https://panel.yourdomain.com`
 - ✅ Wings node shows green heart in Panel
 - ✅ Users can self-register and create servers
 
 ---
 
-**Made with ❤️ by NexusTechPro**  
+**Made with ❤️ by NexusTechPro**
 [github.com/nexustechpro2/VM-in-Google-Idx](https://github.com/nexustechpro2/VM-in-Google-Idx)

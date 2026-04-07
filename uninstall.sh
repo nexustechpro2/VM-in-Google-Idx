@@ -78,7 +78,12 @@ fi
 
 # Stop PHP-FPM
 if pgrep php-fpm >/dev/null; then
-    systemctl stop php8.3-fpm 2>/dev/null || service php8.3-fpm stop 2>/dev/null || pkill php-fpm
+    PHP_VER=""
+    for ver in 8.3 8.4 8.2 8.1; do
+        [ -f "/usr/sbin/php-fpm${ver}" ] && PHP_VER=$ver && break
+    done
+    [ -z "$PHP_VER" ] && PHP_VER="8.3"
+    systemctl stop php${PHP_VER}-fpm 2>/dev/null || service php${PHP_VER}-fpm stop 2>/dev/null || pkill php-fpm
     echo -e "${GREEN}   ✓ Stopped PHP-FPM${NC}"
 fi
 
@@ -402,8 +407,13 @@ if [[ "$REMOVE_PACKAGES" =~ ^[Yy] ]]; then
     # Remove cloudflared
     apt remove -y cloudflared 2>/dev/null && echo -e "${GREEN}   ✓ Cloudflared removed${NC}"
     
-    # Remove PHP
-    apt remove -y php8.3* 2>/dev/null && echo -e "${GREEN}   ✓ PHP 8.3 removed${NC}"
+    # Remove PHP (detect version, prefer 8.3, skip 8.5)
+    PHP_VER=""
+    for ver in 8.3 8.4 8.2 8.1; do
+        [ -f "/usr/sbin/php-fpm${ver}" ] && PHP_VER=$ver && break
+    done
+    [ -z "$PHP_VER" ] && PHP_VER="8.3"
+    apt remove -y php${PHP_VER}* 2>/dev/null && echo -e "${GREEN}   ✓ PHP ${PHP_VER} removed${NC}"
     
     # Remove Nginx
     apt remove -y nginx 2>/dev/null && echo -e "${GREEN}   ✓ Nginx removed${NC}"

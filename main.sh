@@ -265,13 +265,16 @@ EOF
 
             # Nginx
             systemctl is-active nginx > /dev/null 2>&1 && \
-                echo -e "  ${G}✅ Nginx:          Running (port 8443)${N}" || \
+                echo -e "  ${G}✅ Nginx:          Running (port 443)${N}" || \
                 echo -e "  ${Y}⚠️  Nginx:          Not Running${N}"
 
             # PHP-FPM
-            netstat -tlnp 2>/dev/null | grep -q ":9000" && \
-                echo -e "  ${G}✅ PHP-FPM:        Running (port 9000)${N}" || \
+            PHP_SOCK=$(ls /run/php/php*-fpm.sock 2>/dev/null | head -1)
+            if [ -n "$PHP_SOCK" ] && [ -S "$PHP_SOCK" ]; then
+                echo -e "  ${G}✅ PHP-FPM:        Running (socket)${N}"
+            else
                 echo -e "  ${Y}⚠️  PHP-FPM:        Not Running${N}"
+            fi
 
             # Redis
             redis-cli ping > /dev/null 2>&1 && \

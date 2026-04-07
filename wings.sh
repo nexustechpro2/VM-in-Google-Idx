@@ -584,7 +584,7 @@ ps aux | grep -v grep | grep -q cloudflared && echo -e "${GREEN}   ✓ Cloudflar
 echo -e "${CYAN}[19/20] Clearing Panel cache (if present)...${NC}"
 if [ -d "/var/www/pelican" ]; then
     PANEL_PHP=""
-    for ver in 8.5 8.4 8.3 8.2; do
+    for ver in 8.3 8.4 8.2; do
         [ -f "/usr/bin/php${ver}" ] && PANEL_PHP="/usr/bin/php${ver}" && break
     done
     [ -z "$PANEL_PHP" ] && PANEL_PHP=$(which php)
@@ -637,14 +637,14 @@ echo -e "2. Zero Trust → Networks → Tunnels → Configure"
 echo -e "3. Add Public Hostname:"
 echo -e "   - Subdomain: ${GREEN}$(echo $NODE_DOMAIN | cut -d'.' -f1)${NC}"
 echo -e "   - Domain: ${GREEN}$(echo $NODE_DOMAIN | cut -d'.' -f2-)${NC}"
-echo -e "   - Service: ${GREEN}HTTPS → 127.0.0.1:8080${NC}"
+echo -e "   - Service: ${GREEN}HTTP → localhost:8080${NC}"
 echo -e "   - ${RED}⚠️  Enable 'No TLS Verify'${NC}"
 echo ""
 echo -e "${CYAN}📋 UPDATE PANEL NODE${NC}"
 echo -e "Admin → Nodes → Edit Node ${NODE_ID}"
-echo -e "   FQDN: ${GREEN}${NODE_DOMAIN}${NC} | Port: ${GREEN}8443${NC} | SSL: ${GREEN}HTTPS (SSL)${NC}"
+echo -e "   FQDN: ${GREEN}${NODE_DOMAIN}${NC} | Connection Port: ${GREEN}443${NC} | SSL: ${GREEN}HTTPS with (reverse) proxy${NC}"
 echo ""
-echo -e "${CYAN}🧪 TEST: ${GREEN}curl -k https://localhost:8080/api/system${NC}"
+echo -e "${CYAN}🧪 TEST: ${GREEN}curl http://localhost:8080/api/system${NC}"
 echo -e "${CYAN}📋 LOGS: ${GREEN}tail -f /tmp/wings.log${NC}"
 echo -e "${CYAN}🔧 RESTART: ${GREEN}/usr/local/bin/start-wings.sh${NC}"
 echo ""

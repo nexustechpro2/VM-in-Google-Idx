@@ -364,16 +364,48 @@ echo "sshx: $SSHX_LINK"
 # ---- Pelican restart if configured ----
 sleep 5
 BASE_URL="https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main"
+
+# ---- Detect PHP version (prefer 8.3, skip 8.5 — no OPcache) ----
+PHP_VER=""
+for ver in 8.3 8.4 8.2 8.1; do
+    if command -v php\${ver} &>/dev/null || [ -f "/usr/sbin/php-fpm\${ver}" ]; then
+        PHP_VER=\$ver
+        break
+    fi
+done
+[ -z "\$PHP_VER" ] && PHP_VER="8.3"
+
+# ---- PHP-FPM: ensure Unix socket mode (not TCP 9000) ----
+if [ -f "/etc/php/\${PHP_VER}/fpm/pool.d/www.conf" ]; then
+    sudo sed -i "s|^listen = .*|listen = /run/php/php\${PHP_VER}-fpm.sock|" /etc/php/\${PHP_VER}/fpm/pool.d/www.conf
+    sudo sed -i 's|^listen.owner = .*|listen.owner = www-data|' /etc/php/\${PHP_VER}/fpm/pool.d/www.conf
+    sudo sed -i 's|^listen.group = .*|listen.group = www-data|' /etc/php/\${PHP_VER}/fpm/pool.d/www.conf
+fi
+
+# ---- Enable OPcache ----
+sudo apt install -y php\${PHP_VER}-opcache 2>/dev/null || true
+sudo tee /etc/php/\${PHP_VER}/mods-available/opcache.ini > /dev/null <<'OPCEOF'
+zend_extension=opcache
+opcache.enable=1
+opcache.enable_cli=0
+opcache.memory_consumption=256
+opcache.interned_strings_buffer=32
+opcache.max_accelerated_files=30000
+opcache.validate_timestamps=0
+opcache.save_comments=1
+opcache.huge_code_pages=0
+realpath_cache_size=4096K
+realpath_cache_ttl=600
+OPCEOF
+sudo phpenmod -v \${PHP_VER} opcache 2>/dev/null || true
+sudo systemctl restart php\${PHP_VER}-fpm 2>/dev/null || true
+
+# ---- Restart Pelican if installed ----
 if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
-    curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh \
+    curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh \
         && sudo bash /tmp/nexus-restart.sh \
         && rm -f /tmp/nexus-restart.sh
-    # Fix PHP-FPM
-    sudo systemctl restart php8.3-fpm || true
-    # Fix Cloudflare
     sudo systemctl restart cloudflared || true
-    # Clear cache
-    cd /var/www/pelican && sudo php artisan cache:clear && sudo php artisan config:clear || true
 fi
 REMOTE
 
@@ -399,8 +431,19 @@ fi
 
 # Set VNC password to match VM password
 mkdir -p /root/.vnc
-echo "$pass" | vncpasswd -f > /root/.vnc/passwd
-chmod 600 /root/.vnc/passwd
+
+# Install VNC + noVNC + desktop if not already present
+if ! command -v vncserver &>/dev/null || ! command -v websockify &>/dev/null; then
+    apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify 2>/dev/null || true
+fi
+
+# Set VNC password non-interactively using VM password
+# Only set if passwd file doesn't exist yet
+mkdir -p /root/.vnc
+if [ ! -f /root/.vnc/passwd ]; then
+    echo "$pass" | vncpasswd -f > /root/.vnc/passwd
+    chmod 600 /root/.vnc/passwd
+fi
 
 # Ensure xstartup exists
 cat > /root/.vnc/xstartup <<'XSTART'
@@ -478,14 +521,22 @@ FFVSVC
 
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
-systemctl stop vncserver websockify firefox-vnc 2>/dev/null || true
-sleep 2
-systemctl start vncserver
-sleep 3
-systemctl start websockify
-sleep 5
-systemctl start firefox-vnc
-echo "VNC + websockify + Firefox services started"
+
+# Only restart VNC if not already running — avoids disrupting active sessions
+if ! systemctl is-active --quiet vncserver 2>/dev/null; then
+    systemctl stop vncserver websockify firefox-vnc 2>/dev/null || true
+    sleep 2
+    systemctl start vncserver
+    sleep 3
+    systemctl start websockify
+    sleep 5
+    systemctl start firefox-vnc
+    echo "VNC + websockify + Firefox services started"
+else
+    echo "VNC already running — skipping restart"
+    systemctl is-active --quiet websockify || systemctl start websockify
+    systemctl is-active --quiet firefox-vnc || systemctl start firefox-vnc
+fi
 REMOTE
 
     print_status "SUCCESS" "Post-boot setup done"
@@ -623,6 +674,9 @@ freeze_recovery() {
     local serial_log="$BACKUP_DIR/$vm_name.serial.log"
     local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
 
+    # Trap to always log if recovery crashes unexpectedly
+    trap 'echo "[$(date +%H:%M:%S)] FATAL: freeze_recovery crashed unexpectedly" >> "$watchdog_log"' EXIT
+
     echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$watchdog_log"
 
     # Pre-flight — wipe entire tmpfs directory before doing anything
@@ -636,14 +690,22 @@ freeze_recovery() {
     kill_vm "$vm_name"
     sleep 2
 
+    # Force release QEMU write lock before restarting
+    fuser -k "$live_img" 2>/dev/null || true
+    sleep 3
+    rm -f "$BACKUP_DIR/$vm_name.pid"
+    sleep 2
+    echo "[$(date '+%H:%M:%S')] Step 1: QEMU write lock released" >> "$watchdog_log"
+
     # Step 2 — Compress live image to tmpfs (zstd)
     echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$watchdog_log"
     local tmp_c="${snap_compressed}.compressing"
     rm -f "$tmp_c" "$snap_compressed"
 
-    if ! qemu-img convert -O qcow2 -c -o compression_type=zstd "$live_img" "$tmp_c" >> "$watchdog_log" 2>&1; then
+    if ! qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$live_img" "$tmp_c" >> "$watchdog_log" 2>&1; then
         echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$watchdog_log"
         rm -f "$tmp_c"
+        trap - EXIT
         return 1
     fi
     mv "$tmp_c" "$snap_compressed"
@@ -651,18 +713,22 @@ freeze_recovery() {
 
     # Step 3 — Compress back to /home with 20 min timeout
     echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$watchdog_log"
-local restore_tmp="${live_img}.restoring"
-rm -f "$restore_tmp"
+    local restore_tmp="${live_img}.restoring"
+    rm -f "$restore_tmp"
 
-    qemu-img convert -O qcow2 -c -o compression_type=zstd "$snap_compressed" "$restore_tmp" >> "$watchdog_log" 2>&1 &
+    qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$snap_compressed" "$restore_tmp" >> "$watchdog_log" 2>&1 &
     local compress_pid=$!
     local elapsed=0
     local success=false
 
     while [[ $elapsed -lt 1200 ]]; do
         if ! kill -0 "$compress_pid" 2>/dev/null; then
-            if [[ -f "$restore_tmp" ]] && qemu-img check "$restore_tmp" >> "$watchdog_log" 2>&1; then
+            # Check file exists AND is larger than 0 bytes
+            if [[ -f "$restore_tmp" ]] && [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -gt 0 ]] && \
+               qemu-img check "$restore_tmp" >> "$watchdog_log" 2>&1; then
                 success=true
+            else
+                echo "[$(date '+%H:%M:%S')] Step 3: Output file is 0 bytes or invalid — falling back to direct copy" >> "$watchdog_log"
             fi
             break
         fi
@@ -677,18 +743,27 @@ rm -f "$restore_tmp"
         echo "[$(date '+%H:%M:%S')] Compress-back timeout/failed — copying directly from tmpfs..." >> "$watchdog_log"
         if ! cp "$snap_compressed" "$restore_tmp"; then
             echo "[$(date '+%H:%M:%S')] ERROR: Direct copy also failed" >> "$watchdog_log"
+            trap - EXIT
+            return 1
+        fi
+        if [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -eq 0 ]]; then
+            echo "[$(date '+%H:%M:%S')] ERROR: Direct copy produced 0 byte file" >> "$watchdog_log"
+            rm -f "$restore_tmp"
+            trap - EXIT
             return 1
         fi
         if ! qemu-img check "$restore_tmp" >> "$watchdog_log" 2>&1; then
             rm -f "$restore_tmp"
             echo "[$(date '+%H:%M:%S')] ERROR: Direct copy verification failed" >> "$watchdog_log"
+            trap - EXIT
             return 1
         fi
     fi
 
     rm -f "$live_img"
-mv "$restore_tmp" "$live_img"
+    mv "$restore_tmp" "$live_img"
     echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$watchdog_log"
+    trap - EXIT
 
     # Step 4 — Clear tmpfs
     echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$watchdog_log"
@@ -791,10 +866,20 @@ start_freeze_watchdog() {
 
     echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$wlog"
 
+    # Trap to always log if recovery subshell crashes
+    trap 'echo "[$(date +%H:%M:%S)] FATAL: Recovery subshell crashed unexpectedly" >> "$wlog"' EXIT
+
     # Step 1 — Kill the frozen VM first
     echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$wlog"
     kill_vm_local "$vm"
     sleep 2
+
+    # Force release QEMU write lock before restarting
+    fuser -k "$live_img" 2>/dev/null || true
+    sleep 3
+    rm -f "$_BACKUP_DIR/$vm.pid"
+    sleep 2
+    echo "[$(date '+%H:%M:%S')] Step 1: QEMU write lock released" >> "$wlog"
 
     if [[ "$skip_image" != "true" ]]; then
         # Step 2 — Compress live image directly to tmpfs (zstd)
@@ -802,9 +887,10 @@ start_freeze_watchdog() {
         local tmp_c="${snap_compressed}.compressing"
         rm -f "$tmp_c" "$snap_compressed"
 
-        if ! qemu-img convert -O qcow2 -c -o compression_type=zstd "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
+        if ! qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
             echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$wlog"
             rm -f "$tmp_c"
+            trap - EXIT
             return 1
         fi
         mv "$tmp_c" "$snap_compressed"
@@ -812,18 +898,22 @@ start_freeze_watchdog() {
 
         # Step 3 — Compress back to /home with 20 min timeout
         echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$wlog"
-local restore_tmp="${live_img}.restoring"
-rm -f "$restore_tmp"
+        local restore_tmp="${live_img}.restoring"
+        rm -f "$restore_tmp"
 
-        qemu-img convert -O qcow2 -c -o compression_type=zstd "$snap_compressed" "$restore_tmp" >> "$wlog" 2>&1 &
+        qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$snap_compressed" "$restore_tmp" >> "$wlog" 2>&1 &
         local compress_pid=$!
         local elapsed=0
         local success=false
 
         while [[ $elapsed -lt 1200 ]]; do
             if ! kill -0 "$compress_pid" 2>/dev/null; then
-                if [[ -f "$restore_tmp" ]] && qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
+                # Check file exists AND is larger than 0 bytes
+                if [[ -f "$restore_tmp" ]] && [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -gt 0 ]] && \
+                   qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
                     success=true
+                else
+                    echo "[$(date '+%H:%M:%S')] Step 3: Output file is 0 bytes or invalid — falling back to direct copy" >> "$wlog"
                 fi
                 break
             fi
@@ -838,18 +928,27 @@ rm -f "$restore_tmp"
             echo "[$(date '+%H:%M:%S')] Compress-back timeout/failed — copying directly from tmpfs..." >> "$wlog"
             if ! cp "$snap_compressed" "$restore_tmp"; then
                 echo "[$(date '+%H:%M:%S')] ERROR: Direct copy also failed" >> "$wlog"
+                trap - EXIT
+                return 1
+            fi
+            if [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -eq 0 ]]; then
+                echo "[$(date '+%H:%M:%S')] ERROR: Direct copy produced 0 byte file" >> "$wlog"
+                rm -f "$restore_tmp"
+                trap - EXIT
                 return 1
             fi
             if ! qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
                 rm -f "$restore_tmp"
                 echo "[$(date '+%H:%M:%S')] ERROR: Direct copy verification failed" >> "$wlog"
+                trap - EXIT
                 return 1
             fi
         fi
 
         rm -f "$live_img"
-mv "$restore_tmp" "$live_img"
+        mv "$restore_tmp" "$live_img"
         echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$wlog"
+        trap - EXIT
 
         # Step 4 — Clear tmpfs
         echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$wlog"
@@ -1010,13 +1109,48 @@ echo "sshx: \$SSHX_LINK"
 
 sleep 5
 BASE_URL="https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main"
+
+# ---- Detect PHP version (prefer 8.3, skip 8.5 — no OPcache) ----
+PHP_VER=""
+for ver in 8.3 8.4 8.2 8.1; do
+    if command -v php\${ver} &>/dev/null || [ -f "/usr/sbin/php-fpm\${ver}" ]; then
+        PHP_VER=\$ver
+        break
+    fi
+done
+[ -z "\$PHP_VER" ] && PHP_VER="8.3"
+
+# ---- PHP-FPM: ensure Unix socket mode (not TCP 9000) ----
+if [ -f "/etc/php/\${PHP_VER}/fpm/pool.d/www.conf" ]; then
+    sudo sed -i "s|^listen = .*|listen = /run/php/php\${PHP_VER}-fpm.sock|" /etc/php/\${PHP_VER}/fpm/pool.d/www.conf
+    sudo sed -i 's|^listen.owner = .*|listen.owner = www-data|' /etc/php/\${PHP_VER}/fpm/pool.d/www.conf
+    sudo sed -i 's|^listen.group = .*|listen.group = www-data|' /etc/php/\${PHP_VER}/fpm/pool.d/www.conf
+fi
+
+# ---- Enable OPcache ----
+sudo apt install -y php\${PHP_VER}-opcache 2>/dev/null || true
+sudo tee /etc/php/\${PHP_VER}/mods-available/opcache.ini > /dev/null <<'OPCEOF'
+zend_extension=opcache
+opcache.enable=1
+opcache.enable_cli=0
+opcache.memory_consumption=256
+opcache.interned_strings_buffer=32
+opcache.max_accelerated_files=30000
+opcache.validate_timestamps=0
+opcache.save_comments=1
+opcache.huge_code_pages=0
+realpath_cache_size=4096K
+realpath_cache_ttl=600
+OPCEOF
+sudo phpenmod -v \${PHP_VER} opcache 2>/dev/null || true
+sudo systemctl restart php\${PHP_VER}-fpm 2>/dev/null || true
+
+# ---- Restart Pelican if installed ----
 if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
     curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh \
         && sudo bash /tmp/nexus-restart.sh \
         && rm -f /tmp/nexus-restart.sh
-    sudo systemctl restart php8.3-fpm || true
     sudo systemctl restart cloudflared || true
-    cd /var/www/pelican && sudo php artisan cache:clear && sudo php artisan config:clear || true
 fi
 REMOTE
 
@@ -1053,7 +1187,7 @@ startxfce4 &
 XSTART
 chmod +x /root/.vnc/xstartup
 
-tee /etc/systemd/system/vncserver.service > /dev/null <<'VNCSVC'
+# ---- vncserver systemd service ----
 [Unit]
 Description=TightVNC Server
 After=network.target
@@ -1118,17 +1252,23 @@ FFVSVC
 
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
-systemctl stop vncserver websockify firefox-vnc 2>/dev/null || true
-sleep 2
-systemctl start vncserver
-sleep 3
-systemctl start websockify
-sleep 5
-systemctl start firefox-vnc
-echo "VNC + websockify + Firefox services started"
-REMOTE
 
-                    echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY COMPLETE =====" >> "$wlog"
+# Only restart VNC if not already running — avoids disrupting active sessions
+if ! systemctl is-active --quiet vncserver 2>/dev/null; then
+    systemctl stop vncserver websockify firefox-vnc 2>/dev/null || true
+    sleep 2
+    systemctl start vncserver
+    sleep 3
+    systemctl start websockify
+    sleep 5
+    systemctl start firefox-vnc
+    echo "VNC + websockify + Firefox services started"
+else
+    echo "VNC already running — skipping restart"
+    systemctl is-active --quiet websockify || systemctl start websockify
+    systemctl is-active --quiet firefox-vnc || systemctl start firefox-vnc
+fi
+REMOTE
                     return 0
                 fi
                 sleep 5
@@ -1276,7 +1416,7 @@ setup_vm_image() {
     qemu-img resize "$base_img" "$DISK_SIZE" 2>/dev/null || true
 
     print_status "INFO" "Compressing base image..."
-    qemu-img convert -O qcow2 -c -o compression_type=zstd "$base_img" "$BACKUP_DIR/$VM_NAME.img"
+    qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$base_img" "$BACKUP_DIR/$VM_NAME.img"
     rm -f "$base_img"
 
     cat > /tmp/vps-user-data <<EOF

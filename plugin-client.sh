@@ -44,7 +44,7 @@ cd /var/www/pelican
 # ============================================================================
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
 PHP_BIN=""
-for ver in 8.5 8.4 8.3 8.2; do
+for ver in 8.3 8.4 8.2 8.1; do
     [ -f "/usr/bin/php${ver}" ] && PHP_BIN="/usr/bin/php${ver}" && break
 done
 [ -z "$PHP_BIN" ] && PHP_BIN=$(which php 2>/dev/null || echo "php")
@@ -96,7 +96,11 @@ if [ "$DB_CONNECTION" = "pgsql" ]; then
     if ! $PHP_BIN -m | grep -q pdo_pgsql; then
         echo -e "${YELLOW}   ⚠ Installing pgsql extensions...${NC}"
         apt-get update -qq 2>&1 | grep -v "GPG error" || true
-PHP_VER=$(ls /etc/php/ | sort -rV | head -1)
+PHP_VER=""
+for ver in 8.3 8.4 8.2 8.1; do
+    [ -d "/etc/php/${ver}" ] && PHP_VER=$ver && break
+done
+[ -z "$PHP_VER" ] && PHP_VER="8.3"
         apt-get install -y php${PHP_VER}-pgsql php${PHP_VER}-pdo php-pgsql 2>/dev/null || { echo -e "${RED}❌ Failed!${NC}"; exit 1; }
         systemctl restart php${PHP_VER}-fpm 2>/dev/null || service php${PHP_VER}-fpm restart 2>/dev/null || true
         $PHP_BIN -m | grep -q pdo_pgsql || { echo -e "${RED}❌ Extension still not available!${NC}"; exit 1; }
@@ -448,15 +452,17 @@ rm -rf storage/framework/cache/* 2>/dev/null && echo -e "${GREEN}   ✓ Framewor
 
 redis-cli FLUSHDB >/dev/null 2>&1 && echo -e "${GREEN}   ✓ Redis cache cleared${NC}"
 
-PHP_VER=$(ls /etc/php/ | sort -rV | head -1)
+PHP_VER=""
+for ver in 8.3 8.4 8.2 8.1; do
+    [ -d "/etc/php/${ver}" ] && PHP_VER=$ver && break
+done
+[ -z "$PHP_VER" ] && PHP_VER="8.3"
 systemctl restart nginx 2>/dev/null && echo -e "${GREEN}   ✓ Nginx restarted${NC}" || true
 systemctl restart php${PHP_VER}-fpm 2>/dev/null && echo -e "${GREEN}   ✓ PHP-FPM restarted${NC}" || true
 supervisorctl restart pelican-queue 2>/dev/null && echo -e "${GREEN}   ✓ Queue worker restarted${NC}" || true
 
 # Restart Wings
 if [ -f "/usr/local/bin/wings" ]; then
-    sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml 2>/dev/null || true
-    sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml 2>/dev/null || true
     systemctl reset-failed wings 2>/dev/null || true
     systemctl restart wings 2>/dev/null || true
     sleep 3
