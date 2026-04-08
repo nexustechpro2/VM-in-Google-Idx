@@ -309,15 +309,16 @@ echo -e "${CYAN}[4b/20] Installing Node.js + Yarn (required for plugins)...${NC}
 if ! command -v node &>/dev/null; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>/dev/null || true
     apt install -y nodejs 2>/dev/null || true
+fi
 if ! command -v yarn &>/dev/null; then
     npm install -g yarn 2>/dev/null || true
 fi
 
 # Fix yarn/www permissions
+mkdir -p /var/www/.cache/yarn
 touch /var/www/.yarnrc
 chown www-data:www-data /var/www/.yarnrc
 chmod 664 /var/www/.yarnrc
-mkdir -p /var/www/.cache/yarn
 chown -R www-data:www-data /var/www/.cache
 
 # Fix hostname resolution for sudo commands

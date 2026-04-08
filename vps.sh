@@ -85,6 +85,12 @@ check_dependencies() {
         print_status "INFO" "Try: sudo apt install qemu-system cloud-image-utils wget"
         exit 1
     fi
+
+    # Auto-install sshpass if missing
+    if ! command -v sshpass &>/dev/null; then
+        print_status "INFO" "Installing sshpass..."
+        apt-get install -y sshpass 2>/dev/null || true
+    fi
 }
 
 cleanup() {
