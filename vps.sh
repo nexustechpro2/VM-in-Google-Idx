@@ -1428,13 +1428,23 @@ users:
   - name: $USERNAME
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
-    password: $(openssl passwd -6 "$PASSWORD" | tr -d '\n')
+    lock_passwd: false
+    passwd: $(openssl passwd -6 "$PASSWORD" | tr -d '\n')
 chpasswd:
   list: |
     root:$PASSWORD
     $USERNAME:$PASSWORD
   expire: false
 write_files:
+  - path: /etc/ssh/sshd_config.d/99-nexus-pwauth.conf
+    content: |
+      PasswordAuthentication yes
+      PermitRootLogin yes
+    permissions: '0644'
+  - path: /etc/sudoers.d/$USERNAME
+    content: |
+      $USERNAME ALL=(ALL) NOPASSWD:ALL
+    permissions: '0440'
   - path: /etc/systemd/journald.conf.d/no-freeze.conf
     content: |
       [Journal]
@@ -1481,7 +1491,13 @@ write_files:
 runcmd:
   - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - systemctl restart sshd
+  - for f in /etc/ssh/sshd_config.d/*.conf; do sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' "$f" 2>/dev/null || true; done
+  - id $USERNAME || useradd -m -s /bin/bash -G sudo $USERNAME
+  - echo "$USERNAME:$PASSWORD" | chpasswd
+  - echo "root:$PASSWORD" | chpasswd
+  - echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME
+  - chmod 440 /etc/sudoers.d/$USERNAME
+  - systemctl restart ssh || systemctl restart sshd || true
   - systemctl restart systemd-journald
   - journalctl --vacuum-size=1M 2>/dev/null || true
   - modprobe tcp_bbr 2>/dev/null || true
