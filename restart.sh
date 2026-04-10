@@ -1,15 +1,13 @@
 #!/bin/bash
 
 ################################################################################
-# PELICAN AUTO-RESTART SCRIPT v9.4 PRODUCTION READY
-# Fixes from v9.3:
-#   - CRITICAL: Removed sed lines that overwrote Wings port 8080 on every restart
-#   - CRITICAL: Added Wings port 8080 wait loop before starting Cloudflare
-#   - MINOR: Added Redis retry on first-boot failure
-#   - Added local PostgreSQL start before Docker (step 0.5)
-#   - Added DB backup cron registration in Phase 5
-#   - Added DB backup status in status check
-#   - Added backup lock file cleanup in Phase 0
+# PELICAN AUTO-RESTART SCRIPT v9.5 PRODUCTION READY
+# Fixes from v9.4:
+#   - CRITICAL: Bring docker0 and pelican0 bridges UP after Docker starts
+#     (Google IDX/QEMU hypervisor leaves bridges in linkdown state, blocking
+#      container NAT/masquerade even though iptables rules are correct)
+#   - CRITICAL: Same bridge-up fix applied in BONUS network health check
+#   - MINOR: dnsmasq systemd-resolved stub fix documented in comments
 ################################################################################
 
 RED='\033[0;31m'
@@ -20,14 +18,15 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║     Pelican Services Restart v9.4      ║${NC}"
+echo -e "${CYAN}║     Pelican Services Restart v9.5      ║${NC}"
 echo -e "${CYAN}║     Production-Safe Restart            ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
 if [[ $EUID -ne 0 ]]; then
    echo -e "${YELLOW}Switching to root...${NC}"
-   sudo "$0" "$@"
+   SCRIPT_PATH="$(readlink -f /proc/$$/fd/255 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")"
+   sudo bash "$SCRIPT_PATH" "$@"
    exit $?
 fi
 
@@ -112,6 +111,12 @@ echo ""
 
 # ============================================================================
 # Lock DNS — only Cloudflare/Google DNS, no Tailscale override
+# NOTE: If dnsmasq fails to start with "Cannot assign requested address",
+#       it means systemd-resolved is blocking port 53. Fix once with:
+#         mkdir -p /etc/systemd/resolved.conf.d/
+#         echo -e "[Resolve]\nDNSStubListener=no" \
+#           > /etc/systemd/resolved.conf.d/no-stub.conf
+#         systemctl restart systemd-resolved
 # ============================================================================
 chattr -i /etc/resolv.conf 2>/dev/null || true
 cat > /etc/resolv.conf <<'DNSEOF'
@@ -200,6 +205,16 @@ echo ""
 if ! docker ps >/dev/null 2>&1; then
     echo -e "${RED}   ✗ Docker failed to start - check: journalctl -u docker or /var/log/docker.log${NC}"
 fi
+
+# ----------------------------------------------------------------------------
+# FIX: Google IDX/QEMU hypervisor leaves Docker bridges in linkdown state.
+# Without this, iptables MASQUERADE rules exist but never fire because the
+# kernel considers routes via a DOWN interface unreachable. Containers get
+# DNS (via dnsmasq) but cannot reach any external IPs.
+# ----------------------------------------------------------------------------
+ip link set docker0 up 2>/dev/null || true
+ip link set pelican0 up 2>/dev/null || true
+echo -e "${GREEN}   ✓ Docker bridges brought up (docker0, pelican0)${NC}"
 
 systemctl restart dnsmasq 2>/dev/null || true
 
@@ -363,6 +378,9 @@ if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
         rm -f /var/run/docker.pid /var/run/docker.sock
         systemctl start docker
         sleep 5
+        # Re-apply bridge fix if Docker had to be restarted here
+        ip link set docker0 up 2>/dev/null || true
+        ip link set pelican0 up 2>/dev/null || true
     fi
     systemctl reset-failed wings 2>/dev/null || true
     systemctl start wings 2>/dev/null
@@ -474,6 +492,12 @@ if docker info >/dev/null 2>&1; then
     iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN \
         -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+
+    # Ensure bridges are UP — IDX hypervisor leaves them linkdown after Docker
+    # starts, which silently breaks container NAT even with correct iptables rules
+    ip link set docker0 up 2>/dev/null || true
+    ip link set pelican0 up 2>/dev/null || true
+
     echo -e "${GREEN}   ✓ Docker network health OK${NC}"
 fi
 
@@ -528,6 +552,16 @@ CF_COUNT=$(pgrep -c cloudflared 2>/dev/null || echo 0)
     echo -e "${GREEN}✓ Cloudflare:   Running (${CF_COUNT} process)${NC}" || \
     echo -e "${YELLOW}⚠ Cloudflare:   Not Running${NC}"
 
+# Show dnsmasq status
+systemctl is-active --quiet dnsmasq && \
+    echo -e "${GREEN}✓ dnsmasq:      Running (DNS on 172.18.0.1)${NC}" || \
+    echo -e "${RED}✗ dnsmasq:      Not Running — containers will lose DNS!${NC}"
+
+# Show bridge status
+docker0_state=$(cat /sys/class/net/docker0/operstate 2>/dev/null || echo "unknown")
+pelican0_state=$(cat /sys/class/net/pelican0/operstate 2>/dev/null || echo "unknown")
+echo -e "${GREEN}✓ Bridges:      docker0=${docker0_state}, pelican0=${pelican0_state}${NC}"
+
 # Show PostgreSQL status only if using local pgsql
 DB_HOST_CHECK=$(grep "^DB_HOST=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
 DB_CONN_CHECK=$(grep "^DB_CONNECTION=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
@@ -565,4 +599,4 @@ echo -e "  Queue:       ${GREEN}supervisorctl tail -f pelican-queue${NC}"
 echo -e "  Auto-Limits: ${GREEN}tail -f /var/log/pelican-auto-limits-fast.log${NC}"
 echo -e "  DB Backup:   ${GREEN}tail -f /var/log/pelican-db-backup.log${NC}"
 echo ""
-echo "restart.sh v9.4"
+echo "restart.sh v9.5"

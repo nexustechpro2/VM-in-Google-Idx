@@ -1194,6 +1194,7 @@ XSTART
 chmod +x /root/.vnc/xstartup
 
 # ---- vncserver systemd service ----
+tee /etc/systemd/system/vncserver.service > /dev/null <<'VNCSVC'
 [Unit]
 Description=TightVNC Server
 After=network.target
