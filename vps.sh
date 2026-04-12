@@ -305,6 +305,11 @@ DF
     sudo systemctl restart docker || true
 fi
 
+# ---- Disable dnsmasq (conflicts with Docker DNS on port 53) ----
+sudo systemctl stop dnsmasq 2>/dev/null || true
+sudo systemctl disable dnsmasq 2>/dev/null || true
+sudo systemctl mask dnsmasq 2>/dev/null || true
+
 # ---- Network performance tuning ----
 sudo tee /etc/sysctl.d/99-network-perf.conf > /dev/null <<'SYSCTL'
 net.core.rmem_max=134217728
@@ -1557,6 +1562,9 @@ runcmd:
   - journalctl --vacuum-size=1M 2>/dev/null || true
   - modprobe tcp_bbr 2>/dev/null || true
   - sysctl -p /etc/sysctl.d/99-vm-tweaks.conf 2>/dev/null || true
+  - systemctl stop dnsmasq 2>/dev/null || true
+  - systemctl disable dnsmasq 2>/dev/null || true
+  - systemctl mask dnsmasq 2>/dev/null || true
   - sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="[^"]*/& systemd.journald.forward_to_console=0 udev.log_level=3 systemd.log_level=warning/' /etc/default/grub
   - update-grub 2>/dev/null || grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null || true
 EOF
