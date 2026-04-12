@@ -2,24 +2,16 @@
 set -euo pipefail
 
 # =============================
-# Enhanced Multi-VM Manager v4.1
+# Enhanced Multi-VM Manager v4.2
 # Created by NexusTechPro
-# Fixes in v4.1:
-#   - TCG full support (no KVM needed) — correct cpu flags, no x2apic, no host cpu
-#   - Color code crash in subshells fixed — colors redefined inside every subshell
-#   - Network speed tuned — queue sizes, BBR, sysctl inside VM
-#   - Cloudflare tunnel + Tailscale for public IP from private networks
-#   - Anti-freeze: i6300esb watchdog, disable S3/S4, mem-prealloc
-#   - iothread for faster disk I/O
-#   - cpu performance governor auto-set on TCG
-#   - Freeze recovery: compress to tmpfs, compress back to home (zstd, 20 min timeout)
-#   - tmpfs wiped on startup and before every recovery
-#   - BACKUP_DIR fixed for Google idx (/home/user/vms)
-#   - VNC + websockify + Firefox auto-restore on every boot and recovery
-#
-# Architecture:
-#   - /home/user/vms/name.img         = live running image (QEMU reads natively)
-#   - /nexusvms/name.img.compressed   = compressed snapshot (created only on freeze, cleared after restore)
+# Fixes in v4.2:
+#   - Single watchdog enforcement — kills old watchdog before spawning new
+#   - Recovery lock file — prevents concurrent recoveries
+#   - BASE_URL / PHP_VER unbound variable fixed in watchdog SSH block
+#   - sudo mkdir/vncpasswd fixed in watchdog VNC block
+#   - Pelican detection fixed — PELICAN_FOUND pattern, sudo bash, log tail
+#   - set +euo pipefail added to all remote SSH heredocs in watchdog
+#   - _recover_done() helper cleans lock on every return path
 # =============================
 
 # --- ANSI COLORS (global scope) ---
@@ -43,7 +35,7 @@ display_header() {
     clear
     echo -e "${BLUE}========================================================================"
     echo -e "  Created by NexusTechPro"
-    echo -e "  Enhanced Multi-VM Manager v4.1"
+    echo -e "  Enhanced Multi-VM Manager v4.2"
     echo -e "========================================================================${NC}"
     echo
 }
@@ -85,8 +77,6 @@ check_dependencies() {
         print_status "INFO" "Try: sudo apt install qemu-system cloud-image-utils wget"
         exit 1
     fi
-
-    # Auto-install sshpass if missing
     if ! command -v sshpass &>/dev/null; then
         print_status "INFO" "Installing sshpass..."
         apt-get install -y sshpass 2>/dev/null || true
@@ -154,7 +144,6 @@ EOF
 
 # ============================================================================
 # ACCELERATION DETECTION
-# Never mixes -cpu host with TCG — that was the root cause of the crash
 # ============================================================================
 detect_acceleration() {
     if [[ -w /dev/kvm ]]; then
@@ -172,7 +161,7 @@ detect_acceleration() {
 }
 
 # ============================================================================
-# BUILD AND RUN QEMU DIRECTLY (never via $() — globals die in subshell)
+# BUILD AND RUN QEMU
 # ============================================================================
 build_and_run_qemu() {
     local vm_name=$1
@@ -224,7 +213,7 @@ build_and_run_qemu() {
 }
 
 # ============================================================================
-# SSH CHECK — banner check, not just TCP (frozen VMs accept TCP but no banner)
+# SSH CHECK
 # ============================================================================
 check_ssh_port_open() {
     local port=$1
@@ -237,7 +226,6 @@ check_ssh_port_open() {
 # ============================================================================
 # VM PROCESS MANAGEMENT
 # ============================================================================
-
 kill_vm() {
     local vm_name=$1
     local pid_file="$BACKUP_DIR/$vm_name.pid"
@@ -267,7 +255,6 @@ is_vm_running() {
 
 # ============================================================================
 # POST BOOT FIXES
-# Network tuning (BBR, sysctl), journald volatile, docker, tailscale, sshx
 # ============================================================================
 apply_post_boot_fixes() {
     local port=$1
@@ -283,9 +270,9 @@ apply_post_boot_fixes() {
     local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
 
     sshpass -p "$pass" ssh $ssh_opts -p "$port" "${user}@localhost" bash <<REMOTE
-set -e
+set +euo pipefail 2>/dev/null || true
 
-# ---- Journald volatile (prevents journal I/O freeze) ----
+# ---- Journald volatile ----
 sudo mkdir -p /etc/systemd/journald.conf.d
 sudo tee /etc/systemd/journald.conf.d/no-freeze.conf > /dev/null <<'JF'
 [Journal]
@@ -364,14 +351,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable sshx
 sudo systemctl restart sshx
 sleep 4
-SSHX_LINK=$(sudo journalctl -u sshx -n 10 --no-pager 2>/dev/null | grep -o 'https://sshx.io/s/[^ ]*' | tail -1)
-echo "sshx: $SSHX_LINK"
+SSHX_LINK=\$(sudo journalctl -u sshx -n 10 --no-pager 2>/dev/null | grep -o 'https://sshx.io/s/[^ ]*' | tail -1)
+echo "sshx: \$SSHX_LINK"
 
-# ---- Pelican restart if configured ----
+# ---- PHP detection ----
 sleep 5
 BASE_URL="https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main"
 
-# ---- Detect PHP version (prefer 8.3, skip 8.5 — no OPcache) ----
 PHP_VER=""
 for ver in 8.3 8.4 8.2 8.1; do
     if command -v php\${ver} &>/dev/null || [ -f "/usr/sbin/php-fpm\${ver}" ]; then
@@ -381,7 +367,7 @@ for ver in 8.3 8.4 8.2 8.1; do
 done
 [ -z "\$PHP_VER" ] && PHP_VER="8.3"
 
-# ---- PHP-FPM: ensure Unix socket mode (not TCP 9000) ----
+# ---- PHP-FPM socket mode ----
 if [ -f "/etc/php/\${PHP_VER}/fpm/pool.d/www.conf" ]; then
     sudo sed -i "s|^listen = .*|listen = /run/php/php\${PHP_VER}-fpm.sock|" /etc/php/\${PHP_VER}/fpm/pool.d/www.conf
     sudo sed -i 's|^listen.owner = .*|listen.owner = www-data|' /etc/php/\${PHP_VER}/fpm/pool.d/www.conf
@@ -406,23 +392,23 @@ OPCEOF
 sudo phpenmod -v \${PHP_VER} opcache 2>/dev/null || true
 sudo systemctl restart php\${PHP_VER}-fpm 2>/dev/null || true
 
-# ---- Restart Pelican if installed ----
+# ---- Pelican restart ----
 PELICAN_FOUND=false
-sudo test -f /root/.pelican.env 2>/dev/null && PELICAN_FOUND=true
-[[ -f /var/www/pelican/.env ]] && PELICAN_FOUND=true
-[[ -d /var/www/pelican ]] && PELICAN_FOUND=true
+sudo test -f /root/.pelican.env 2>/dev/null && PELICAN_FOUND=true || true
+[ -f /var/www/pelican/.env ] && PELICAN_FOUND=true || true
+[ -d /var/www/pelican ] && PELICAN_FOUND=true || true
 
-if [[ "\$PELICAN_FOUND" == "true" ]]; then
+if [ "\$PELICAN_FOUND" = "true" ]; then
     echo "Pelican detected — downloading and running restart.sh..."
-    if curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh 2>/dev/null; then
+    if curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh 2>/dev/null; then
         chmod +x /tmp/nexus-restart.sh
         sudo bash /tmp/nexus-restart.sh </dev/null > /var/log/nexus-restart.log 2>&1 &
         RESTART_PID=\$!
         echo "restart.sh launched (PID \$RESTART_PID)"
         sleep 8
-        echo "=== restart.sh log (first 30 lines) ==="
+        echo "=== restart.sh log ==="
         sudo tail -30 /var/log/nexus-restart.log 2>/dev/null || echo "(log empty)"
-        echo "========================================"
+        echo "======================"
         rm -f /tmp/nexus-restart.sh
         sudo systemctl restart cloudflared 2>/dev/null || true
     else
@@ -433,12 +419,12 @@ else
 fi
 REMOTE
 
-    # ---- VNC + websockify + Firefox — separate root SSH call ----
+    # ---- VNC + websockify + Firefox via root SSH ----
     print_status "INFO" "Setting up VNC + Firefox auto-restore..."
     sshpass -p "$pass" ssh $ssh_opts -p "$port" "root@localhost" bash <<REMOTE
-set -e
+set +euo pipefail 2>/dev/null || true
 
-# ---- Fix Docker bridge linkdown (permanent) ----
+# ---- Fix Docker bridge linkdown ----
 if [ ! -f /etc/systemd/system/fix-docker-bridges.service ]; then
     cat > /etc/systemd/system/fix-docker-bridges.service <<'BRIDGESVC'
 [Unit]
@@ -460,7 +446,7 @@ BRIDGESVC
     echo "fix-docker-bridges service installed"
 fi
 
-# Write Firefox user.js for silent session restore
+# ---- Firefox session restore ----
 FIREFOX_PROFILE=\$(find /root/.config/mozilla/firefox -maxdepth 1 -name "*.default-release" -type d 2>/dev/null | head -1)
 if [[ -n "\$FIREFOX_PROFILE" ]]; then
     cat > "\$FIREFOX_PROFILE/user.js" <<'USERJS'
@@ -475,23 +461,18 @@ USERJS
     echo "Firefox user.js written to \$FIREFOX_PROFILE"
 fi
 
-# Set VNC password to match VM password
+# ---- VNC setup ----
 mkdir -p /root/.vnc
-
-# Install VNC + noVNC + desktop if not already present
 if ! command -v vncserver &>/dev/null || ! command -v websockify &>/dev/null; then
     apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify 2>/dev/null || true
 fi
 
-# Set VNC password non-interactively using VM password
-# Only set if passwd file doesn't exist yet
-mkdir -p /root/.vnc
 if [ ! -f /root/.vnc/passwd ]; then
-    echo "$pass" | vncpasswd -f > /root/.vnc/passwd
+    VNC_PASS="${pass:0:8}"
+    echo "\$VNC_PASS" | vncpasswd -f > /root/.vnc/passwd
     chmod 600 /root/.vnc/passwd
 fi
 
-# Ensure xstartup exists
 cat > /root/.vnc/xstartup <<'XSTART'
 #!/bin/bash
 xrdb \$HOME/.Xresources 2>/dev/null || true
@@ -499,7 +480,6 @@ startxfce4 &
 XSTART
 chmod +x /root/.vnc/xstartup
 
-# ---- vncserver systemd service ----
 tee /etc/systemd/system/vncserver.service > /dev/null <<'VNCSVC'
 [Unit]
 Description=TightVNC Server
@@ -522,7 +502,6 @@ RestartSec=5
 WantedBy=multi-user.target
 VNCSVC
 
-# ---- websockify systemd service ----
 tee /etc/systemd/system/websockify.service > /dev/null <<'WEBSVC'
 [Unit]
 Description=WebSockify noVNC proxy
@@ -542,10 +521,9 @@ RestartSec=5
 WantedBy=multi-user.target
 WEBSVC
 
-# ---- Firefox VNC systemd service ----
 tee /etc/systemd/system/firefox-vnc.service > /dev/null <<'FFVSVC'
 [Unit]
-Description=Firefox on VNC display for idx session
+Description=Firefox on VNC display
 After=network.target
 After=websockify.service
 After=vncserver.service
@@ -568,7 +546,6 @@ FFVSVC
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
 
-# Only restart VNC if not already running — avoids disrupting active sessions
 if ! systemctl is-active --quiet vncserver 2>/dev/null; then
     systemctl stop vncserver websockify firefox-vnc 2>/dev/null || true
     sleep 2
@@ -606,6 +583,7 @@ setup_cloudflare_tunnel() {
     local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
 
     sshpass -p "$pass" ssh $ssh_opts -p "$port" "${user}@localhost" bash <<REMOTE
+set +euo pipefail 2>/dev/null || true
 if ! command -v cloudflared &>/dev/null; then
     curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
         -o /usr/local/bin/cloudflared
@@ -720,34 +698,26 @@ freeze_recovery() {
     local serial_log="$BACKUP_DIR/$vm_name.serial.log"
     local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
 
-    # Trap to always log if recovery crashes unexpectedly
-    trap 'echo "[$(date +%H:%M:%S)] FATAL: freeze_recovery crashed unexpectedly" >> "$watchdog_log"' EXIT
-
+    trap 'echo "[$(date +%H:%M:%S)] FATAL: freeze_recovery crashed" >> "$watchdog_log"' EXIT
     echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$watchdog_log"
 
-    # Pre-flight — wipe entire tmpfs directory before doing anything
     echo "[$(date '+%H:%M:%S')] Pre-flight: Wiping tmpfs..." >> "$watchdog_log"
     rm -rf "${SNAPSHOT_DIR:?}"/*
     mkdir -p "${SNAPSHOT_DIR:?}"
-    echo "[$(date '+%H:%M:%S')] Pre-flight: tmpfs wiped, proceeding..." >> "$watchdog_log"
+    echo "[$(date '+%H:%M:%S')] Pre-flight: tmpfs wiped" >> "$watchdog_log"
 
-    # Step 1 — Kill frozen VM
     echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$watchdog_log"
     kill_vm "$vm_name"
     sleep 2
-
-    # Force release QEMU write lock before restarting
     fuser -k "$live_img" 2>/dev/null || true
     sleep 3
     rm -f "$BACKUP_DIR/$vm_name.pid"
     sleep 2
     echo "[$(date '+%H:%M:%S')] Step 1: QEMU write lock released" >> "$watchdog_log"
 
-    # Step 2 — Compress live image to tmpfs (zstd)
     echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$watchdog_log"
     local tmp_c="${snap_compressed}.compressing"
     rm -f "$tmp_c" "$snap_compressed"
-
     if ! qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$live_img" "$tmp_c" >> "$watchdog_log" 2>&1; then
         echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$watchdog_log"
         rm -f "$tmp_c"
@@ -755,13 +725,11 @@ freeze_recovery() {
         return 1
     fi
     mv "$tmp_c" "$snap_compressed"
-    echo "[$(date '+%H:%M:%S')] Compressed to tmpfs: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$watchdog_log"
+    echo "[$(date '+%H:%M:%S')] Compressed: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$watchdog_log"
 
-    # Step 3 — Compress back to /home with 20 min timeout
-    echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$watchdog_log"
+    echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home..." >> "$watchdog_log"
     local restore_tmp="${live_img}.restoring"
     rm -f "$restore_tmp"
-
     qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$snap_compressed" "$restore_tmp" >> "$watchdog_log" 2>&1 &
     local compress_pid=$!
     local elapsed=0
@@ -769,12 +737,11 @@ freeze_recovery() {
 
     while [[ $elapsed -lt 1200 ]]; do
         if ! kill -0 "$compress_pid" 2>/dev/null; then
-            # Check file exists AND is larger than 0 bytes
             if [[ -f "$restore_tmp" ]] && [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -gt 0 ]] && \
                qemu-img check "$restore_tmp" >> "$watchdog_log" 2>&1; then
                 success=true
             else
-                echo "[$(date '+%H:%M:%S')] Step 3: Output file is 0 bytes or invalid — falling back to direct copy" >> "$watchdog_log"
+                echo "[$(date '+%H:%M:%S')] Step 3: Output invalid — falling back to direct copy" >> "$watchdog_log"
             fi
             break
         fi
@@ -786,9 +753,9 @@ freeze_recovery() {
         kill "$compress_pid" 2>/dev/null || true
         wait "$compress_pid" 2>/dev/null || true
         rm -f "$restore_tmp"
-        echo "[$(date '+%H:%M:%S')] Compress-back timeout/failed — copying directly from tmpfs..." >> "$watchdog_log"
+        echo "[$(date '+%H:%M:%S')] Copying directly from tmpfs..." >> "$watchdog_log"
         if ! cp "$snap_compressed" "$restore_tmp"; then
-            echo "[$(date '+%H:%M:%S')] ERROR: Direct copy also failed" >> "$watchdog_log"
+            echo "[$(date '+%H:%M:%S')] ERROR: Direct copy failed" >> "$watchdog_log"
             trap - EXIT
             return 1
         fi
@@ -811,22 +778,19 @@ freeze_recovery() {
     echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$watchdog_log"
     trap - EXIT
 
-    # Step 4 — Clear tmpfs
     echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$watchdog_log"
     rm -rf "${SNAPSHOT_DIR:?}"/*
 
-    # Step 5 — Restart VM
     echo "[$(date '+%H:%M:%S')] Step 5: Restarting VM..." >> "$watchdog_log"
     rm -f "$serial_log"
-build_and_run_qemu "$vm_name"
-sleep 3
-if [[ ! -f "$BACKUP_DIR/$vm_name.pid" ]] || ! kill -0 "$(cat "$BACKUP_DIR/$vm_name.pid" 2>/dev/null)" 2>/dev/null; then
-    echo "[$(date '+%H:%M:%S')] ERROR: QEMU daemonized but process is dead — check serial log" >> "$watchdog_log"
-    return 1
-fi
-echo "[$(date '+%H:%M:%S')] VM process alive (PID $(cat "$BACKUP_DIR/$vm_name.pid"))" >> "$watchdog_log"
+    build_and_run_qemu "$vm_name"
+    sleep 3
+    if [[ ! -f "$BACKUP_DIR/$vm_name.pid" ]] || ! kill -0 "$(cat "$BACKUP_DIR/$vm_name.pid" 2>/dev/null)" 2>/dev/null; then
+        echo "[$(date '+%H:%M:%S')] ERROR: QEMU process dead after start" >> "$watchdog_log"
+        return 1
+    fi
+    echo "[$(date '+%H:%M:%S')] VM alive (PID $(cat "$BACKUP_DIR/$vm_name.pid"))" >> "$watchdog_log"
 
-    # Step 6 — Wait for SSH
     local el=0
     while [[ $el -lt 120 ]]; do
         if check_ssh_port_open "$SSH_PORT"; then
@@ -846,13 +810,24 @@ echo "[$(date '+%H:%M:%S')] VM process alive (PID $(cat "$BACKUP_DIR/$vm_name.pi
 
 # ============================================================================
 # BACKGROUND FREEZE WATCHDOG
-# Colors are redefined inside subshell — fixes the $'\E[1' crash
-# Acceleration detection is also inline — fixes the cpu host/TCG crash
 # ============================================================================
 start_freeze_watchdog() {
     local vm_name=$1
     local serial_log="$BACKUP_DIR/$vm_name.serial.log"
     local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
+    local watchdog_pid_file="$BACKUP_DIR/$vm_name.watchdog.pid"
+
+    # Kill any existing watchdog before spawning a new one
+    if [[ -f "$watchdog_pid_file" ]]; then
+        local old_pid
+        old_pid=$(cat "$watchdog_pid_file" 2>/dev/null || true)
+        if [[ -n "$old_pid" ]]; then
+            kill "$old_pid" 2>/dev/null || true
+            sleep 1
+        fi
+        rm -f "$watchdog_pid_file"
+    fi
+
     local _BACKUP_DIR="$BACKUP_DIR"
     local _SNAPSHOT_DIR="$SNAPSHOT_DIR"
     local _SSH_PORT="$SSH_PORT"
@@ -860,6 +835,7 @@ start_freeze_watchdog() {
     local _USERNAME="$USERNAME"
     local _MEMORY="$MEMORY"
     local _CPUS="$CPUS"
+    local _BASE_URL="https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main"
 
     (
         RED='\033[0;31m'
@@ -902,104 +878,115 @@ start_freeze_watchdog() {
             fi
         }
 
-recover_local() {
-    local vm=$1
-    local skip_image=${2:-false}
-    local live_img="$_BACKUP_DIR/$vm.img"
-    local snap_compressed="$_SNAPSHOT_DIR/$vm.img.compressed"
-    local serial="$_BACKUP_DIR/$vm.serial.log"
-    local wlog="$_BACKUP_DIR/$vm.watchdog.log"
+        recover_local() {
+            local vm=$1
+            local skip_image=${2:-false}
+            local live_img="$_BACKUP_DIR/$vm.img"
+            local snap_compressed="$_SNAPSHOT_DIR/$vm.img.compressed"
+            local serial="$_BACKUP_DIR/$vm.serial.log"
+            local wlog="$_BACKUP_DIR/$vm.watchdog.log"
+            local lock_file="$_BACKUP_DIR/$vm.recovery.lock"
 
-    # Trap MUST come after wlog is defined
-    trap 'echo "[$(date +%H:%M:%S)] FATAL: Recovery subshell crashed unexpectedly" >> "$wlog"' EXIT
-
-    echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$wlog"
-
-    # Step 1 — Kill the frozen VM first
-    echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$wlog"
-    kill_vm_local "$vm"
-    sleep 2
-
-    # Force release QEMU write lock before restarting
-    fuser -k "$live_img" 2>/dev/null || true
-    sleep 3
-    rm -f "$_BACKUP_DIR/$vm.pid"
-    sleep 2
-    echo "[$(date '+%H:%M:%S')] Step 1: QEMU write lock released" >> "$wlog"
-
-    if [[ "$skip_image" != "true" ]]; then
-        # Step 2 — Compress live image directly to tmpfs (zstd)
-        echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$wlog"
-        local tmp_c="${snap_compressed}.compressing"
-        rm -f "$tmp_c" "$snap_compressed"
-
-        if ! qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
-            echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$wlog"
-            rm -f "$tmp_c"
-            trap - EXIT
-            return 1
-        fi
-        mv "$tmp_c" "$snap_compressed"
-        echo "[$(date '+%H:%M:%S')] Compressed to tmpfs: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$wlog"
-
-        # Step 3 — Compress back to /home with 20 min timeout
-        echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$wlog"
-        local restore_tmp="${live_img}.restoring"
-        rm -f "$restore_tmp"
-
-        qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$snap_compressed" "$restore_tmp" >> "$wlog" 2>&1 &
-        local compress_pid=$!
-        local elapsed=0
-        local success=false
-
-        while [[ $elapsed -lt 1200 ]]; do
-            if ! kill -0 "$compress_pid" 2>/dev/null; then
-                # Check file exists AND is larger than 0 bytes
-                if [[ -f "$restore_tmp" ]] && [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -gt 0 ]] && \
-                   qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
-                    success=true
-                else
-                    echo "[$(date '+%H:%M:%S')] Step 3: Output file is 0 bytes or invalid — falling back to direct copy" >> "$wlog"
+            # Prevent concurrent recoveries
+            if [[ -f "$lock_file" ]]; then
+                local lock_pid
+                lock_pid=$(cat "$lock_file" 2>/dev/null || true)
+                if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
+                    echo "[$(date '+%H:%M:%S')] Recovery already in progress (PID $lock_pid) — skipping" >> "$wlog"
+                    return 0
                 fi
-                break
             fi
-            sleep 5
-            elapsed=$((elapsed + 5))
-        done
+            echo $$ > "$lock_file"
 
-        if [[ "$success" == false ]]; then
-            kill "$compress_pid" 2>/dev/null || true
-            wait "$compress_pid" 2>/dev/null || true
-            rm -f "$restore_tmp"
-            echo "[$(date '+%H:%M:%S')] Compress-back timeout/failed — copying directly from tmpfs..." >> "$wlog"
-            if ! cp "$snap_compressed" "$restore_tmp"; then
-                echo "[$(date '+%H:%M:%S')] ERROR: Direct copy also failed" >> "$wlog"
+            # Helper to clean lock on every exit path
+            _recover_done() {
+                rm -f "$lock_file"
                 trap - EXIT
-                return 1
-            fi
-            if [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -eq 0 ]]; then
-                echo "[$(date '+%H:%M:%S')] ERROR: Direct copy produced 0 byte file" >> "$wlog"
+            }
+            trap '_recover_done; echo "[$(date +%H:%M:%S)] FATAL: Recovery crashed" >> "$wlog"' EXIT
+
+            echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$wlog"
+
+            # Step 1 — Kill frozen VM
+            echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$wlog"
+            kill_vm_local "$vm"
+            sleep 2
+            fuser -k "$live_img" 2>/dev/null || true
+            sleep 3
+            rm -f "$_BACKUP_DIR/$vm.pid"
+            sleep 2
+            echo "[$(date '+%H:%M:%S')] Step 1: QEMU write lock released" >> "$wlog"
+
+            if [[ "$skip_image" != "true" ]]; then
+                # Step 2 — Compress to tmpfs
+                echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$wlog"
+                local tmp_c="${snap_compressed}.compressing"
+                rm -f "$tmp_c" "$snap_compressed"
+                if ! qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
+                    echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$wlog"
+                    rm -f "$tmp_c"
+                    _recover_done
+                    return 1
+                fi
+                mv "$tmp_c" "$snap_compressed"
+                echo "[$(date '+%H:%M:%S')] Compressed: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$wlog"
+
+                # Step 3 — Compress back to /home
+                echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$wlog"
+                local restore_tmp="${live_img}.restoring"
                 rm -f "$restore_tmp"
-                trap - EXIT
-                return 1
-            fi
-            if ! qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
-                rm -f "$restore_tmp"
-                echo "[$(date '+%H:%M:%S')] ERROR: Direct copy verification failed" >> "$wlog"
-                trap - EXIT
-                return 1
-            fi
-        fi
+                qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$snap_compressed" "$restore_tmp" >> "$wlog" 2>&1 &
+                local compress_pid=$!
+                local elapsed=0
+                local success=false
 
-        rm -f "$live_img"
-        mv "$restore_tmp" "$live_img"
-        echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$wlog"
-        trap - EXIT
+                while [[ $elapsed -lt 1200 ]]; do
+                    if ! kill -0 "$compress_pid" 2>/dev/null; then
+                        if [[ -f "$restore_tmp" ]] && [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -gt 0 ]] && \
+                           qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
+                            success=true
+                        else
+                            echo "[$(date '+%H:%M:%S')] Step 3: Output invalid — falling back to direct copy" >> "$wlog"
+                        fi
+                        break
+                    fi
+                    sleep 5
+                    elapsed=$((elapsed + 5))
+                done
 
-        # Step 4 — Clear tmpfs
-        echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$wlog"
-        rm -rf "${_SNAPSHOT_DIR:?}"/*
-    fi
+                if [[ "$success" == false ]]; then
+                    kill "$compress_pid" 2>/dev/null || true
+                    wait "$compress_pid" 2>/dev/null || true
+                    rm -f "$restore_tmp"
+                    echo "[$(date '+%H:%M:%S')] Copying directly from tmpfs..." >> "$wlog"
+                    if ! cp "$snap_compressed" "$restore_tmp"; then
+                        echo "[$(date '+%H:%M:%S')] ERROR: Direct copy failed" >> "$wlog"
+                        _recover_done
+                        return 1
+                    fi
+                    if [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -eq 0 ]]; then
+                        echo "[$(date '+%H:%M:%S')] ERROR: Direct copy produced 0 byte file" >> "$wlog"
+                        rm -f "$restore_tmp"
+                        _recover_done
+                        return 1
+                    fi
+                    if ! qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
+                        rm -f "$restore_tmp"
+                        echo "[$(date '+%H:%M:%S')] ERROR: Direct copy verification failed" >> "$wlog"
+                        _recover_done
+                        return 1
+                    fi
+                fi
+
+                rm -f "$live_img"
+                mv "$restore_tmp" "$live_img"
+                echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$wlog"
+                _recover_done
+
+                # Step 4 — Clear tmpfs
+                echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$wlog"
+                rm -rf "${_SNAPSHOT_DIR:?}"/*
+            fi
 
             # Step 5 — Restart VM
             echo "[$(date '+%H:%M:%S')] Step 5: Restarting VM..." >> "$wlog"
@@ -1013,8 +1000,7 @@ recover_local() {
             local pf_extra=""
             if [[ -f "$_BACKUP_DIR/$vm.conf" ]]; then
                 local pf_conf
-                pf_conf=$(grep ^PORT_FORWARDS "$_BACKUP_DIR/$vm.conf" 2>/dev/null \
-                    | cut -d'"' -f2)
+                pf_conf=$(grep ^PORT_FORWARDS "$_BACKUP_DIR/$vm.conf" 2>/dev/null | cut -d'"' -f2)
                 if [[ -n "$pf_conf" ]]; then
                     IFS=',' read -ra pf_arr <<< "$pf_conf"
                     for pf in "${pf_arr[@]}"; do
@@ -1047,33 +1033,30 @@ recover_local() {
             qcmd+=" -display none -daemonize"
             qcmd+=" -pidfile $_BACKUP_DIR/$vm.pid"
 
-# FIXED — verify the pidfile was actually created
-eval "$qcmd" >> "$wlog" 2>&1
-sleep 3
-if [[ ! -f "$_BACKUP_DIR/$vm.pid" ]] || ! kill -0 "$(cat "$_BACKUP_DIR/$vm.pid" 2>/dev/null)" 2>/dev/null; then
-    echo "[$(date '+%H:%M:%S')] ERROR: QEMU failed to start — pidfile missing or process dead" >> "$wlog"
-    echo "[$(date '+%H:%M:%S')] Last QEMU output:" >> "$wlog"
-    tail -5 "$wlog" >> "$wlog" 2>/dev/null || true
-    return 1
-fi
-echo "[$(date '+%H:%M:%S')] VM process confirmed alive (PID $(cat "$_BACKUP_DIR/$vm.pid"))" >> "$wlog"
+            eval "$qcmd" >> "$wlog" 2>&1
+            sleep 3
+            if [[ ! -f "$_BACKUP_DIR/$vm.pid" ]] || ! kill -0 "$(cat "$_BACKUP_DIR/$vm.pid" 2>/dev/null)" 2>/dev/null; then
+                echo "[$(date '+%H:%M:%S')] ERROR: QEMU failed to start" >> "$wlog"
+                _recover_done
+                return 1
+            fi
+            echo "[$(date '+%H:%M:%S')] VM confirmed alive (PID $(cat "$_BACKUP_DIR/$vm.pid"))" >> "$wlog"
 
             # Step 6 — Wait for SSH then post-recovery
             local el=0
             while [[ $el -lt 120 ]]; do
                 if check_ssh_local "$_SSH_PORT"; then
-                    echo "[$(date '+%H:%M:%S')] SSH ready — post-recovery setup..." >> "$wlog"
-                    sleep 10
-echo "[$(date '+%H:%M:%S')] SSH ready — running full post-boot setup..." >> "$wlog"
+                    echo "[$(date '+%H:%M:%S')] SSH ready — running post-boot setup..." >> "$wlog"
                     sleep 10
 
-                    # ---- User fixes (BBR, docker, journald, tailscale, sshx, pelican) ----
-                        sshpass -p "$_PASSWORD" ssh \
+                    # ---- User fixes ----
+                    sshpass -p "$_PASSWORD" ssh \
                         -o StrictHostKeyChecking=no \
                         -o UserKnownHostsFile=/dev/null \
                         -o ConnectTimeout=15 \
                         -o LogLevel=ERROR \
                         -p "$_SSH_PORT" "${_USERNAME}@localhost" bash <<REMOTE >> "$wlog" 2>&1
+set +euo pipefail 2>/dev/null || true
 
 sudo mkdir -p /etc/systemd/journald.conf.d
 sudo tee /etc/systemd/journald.conf.d/no-freeze.conf > /dev/null <<'JF'
@@ -1153,9 +1136,8 @@ SSHX_LINK=\$(sudo journalctl -u sshx -n 10 --no-pager 2>/dev/null | grep -o 'htt
 echo "sshx: \$SSHX_LINK"
 
 sleep 5
-BASE_URL="https://raw.githubusercontent.com/nexustechpro2/VM-in-Google-Idx/main"
+BASE_URL="${_BASE_URL}"
 
-# ---- Detect PHP version (prefer 8.3, skip 8.5 — no OPcache) ----
 PHP_VER=""
 for ver in 8.3 8.4 8.2 8.1; do
     if command -v php\${ver} &>/dev/null || [ -f "/usr/sbin/php-fpm\${ver}" ]; then
@@ -1165,16 +1147,14 @@ for ver in 8.3 8.4 8.2 8.1; do
 done
 [ -z "\$PHP_VER" ] && PHP_VER="8.3"
 
-# ---- PHP-FPM: ensure Unix socket mode (not TCP 9000) ----
 if [ -f "/etc/php/\${PHP_VER}/fpm/pool.d/www.conf" ]; then
     sudo sed -i "s|^listen = .*|listen = /run/php/php\${PHP_VER}-fpm.sock|" /etc/php/\${PHP_VER}/fpm/pool.d/www.conf
     sudo sed -i 's|^listen.owner = .*|listen.owner = www-data|' /etc/php/\${PHP_VER}/fpm/pool.d/www.conf
     sudo sed -i 's|^listen.group = .*|listen.group = www-data|' /etc/php/\${PHP_VER}/fpm/pool.d/www.conf
 fi
 
-# ---- Enable OPcache ----
 sudo apt install -y php\${PHP_VER}-opcache 2>/dev/null || true
-sudo tee /etc/php/${PHP_VER}/mods-available/opcache.ini > /dev/null <<OPCEOF
+sudo tee /etc/php/\${PHP_VER}/mods-available/opcache.ini > /dev/null <<OPCEOF
 zend_extension=opcache
 opcache.enable=1
 opcache.enable_cli=0
@@ -1190,16 +1170,29 @@ OPCEOF
 sudo phpenmod -v \${PHP_VER} opcache 2>/dev/null || true
 sudo systemctl restart php\${PHP_VER}-fpm 2>/dev/null || true
 
-# ---- Restart Pelican if installed ----
-if sudo test -f /root/.pelican.env || [[ -f /var/www/pelican/.env ]] || [[ -d /var/www/pelican ]]; then
-    curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh
-    chmod +x /tmp/nexus-restart.sh
-    sudo nohup bash /tmp/nexus-restart.sh </dev/null > /var/log/nexus-restart.log 2>&1 &
-    disown
-    echo "restart.sh launched (PID $!)"
-    sleep 5
-    sudo tail -20 /var/log/nexus-restart.log 2>/dev/null || true
-    sudo systemctl restart cloudflared || true
+PELICAN_FOUND=false
+sudo test -f /root/.pelican.env 2>/dev/null && PELICAN_FOUND=true || true
+[ -f /var/www/pelican/.env ] && PELICAN_FOUND=true || true
+[ -d /var/www/pelican ] && PELICAN_FOUND=true || true
+
+if [ "\$PELICAN_FOUND" = "true" ]; then
+    echo "Pelican detected — running restart.sh..."
+    if curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh 2>/dev/null; then
+        chmod +x /tmp/nexus-restart.sh
+        sudo bash /tmp/nexus-restart.sh </dev/null > /var/log/nexus-restart.log 2>&1 &
+        RESTART_PID=\$!
+        echo "restart.sh launched (PID \$RESTART_PID)"
+        sleep 8
+        echo "=== restart.sh log ==="
+        sudo tail -30 /var/log/nexus-restart.log 2>/dev/null || echo "(log empty)"
+        echo "======================"
+        rm -f /tmp/nexus-restart.sh
+        sudo systemctl restart cloudflared 2>/dev/null || true
+    else
+        echo "ERROR: Failed to download restart.sh"
+    fi
+else
+    echo "Pelican not detected — skipping restart.sh"
 fi
 REMOTE
 
@@ -1209,8 +1202,8 @@ REMOTE
                         -o UserKnownHostsFile=/dev/null \
                         -o ConnectTimeout=15 \
                         -o LogLevel=ERROR \
-                        -p "$_SSH_PORT" "${_USERNAME}@localhost" bash <<REMOTE >> "$wlog" 2>&1
-set -e
+                        -p "$_SSH_PORT" "root@localhost" bash <<REMOTE >> "$wlog" 2>&1
+set +euo pipefail 2>/dev/null || true
 
 FIREFOX_PROFILE=\$(find /root/.config/mozilla/firefox -maxdepth 1 -name "*.default-release" -type d 2>/dev/null | head -1)
 if [[ -n "\$FIREFOX_PROFILE" ]]; then
@@ -1226,8 +1219,15 @@ USERJS
 fi
 
 mkdir -p /root/.vnc
-echo "$_PASSWORD" | vncpasswd -f > /root/.vnc/passwd
-chmod 600 /root/.vnc/passwd
+if ! command -v vncserver &>/dev/null || ! command -v websockify &>/dev/null; then
+    apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify 2>/dev/null || true
+fi
+
+if [ ! -f /root/.vnc/passwd ]; then
+    VNC_PASS="${_PASSWORD:0:8}"
+    echo "\$VNC_PASS" | vncpasswd -f > /root/.vnc/passwd
+    chmod 600 /root/.vnc/passwd
+fi
 
 cat > /root/.vnc/xstartup <<'XSTART'
 #!/bin/bash
@@ -1236,7 +1236,6 @@ startxfce4 &
 XSTART
 chmod +x /root/.vnc/xstartup
 
-# ---- vncserver systemd service ----
 tee /etc/systemd/system/vncserver.service > /dev/null <<'VNCSVC'
 [Unit]
 Description=TightVNC Server
@@ -1303,7 +1302,6 @@ FFVSVC
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
 
-# Only restart VNC if not already running — avoids disrupting active sessions
 if ! systemctl is-active --quiet vncserver 2>/dev/null; then
     systemctl stop vncserver websockify firefox-vnc 2>/dev/null || true
     sleep 2
@@ -1312,13 +1310,14 @@ if ! systemctl is-active --quiet vncserver 2>/dev/null; then
     systemctl start websockify
     sleep 5
     systemctl start firefox-vnc
-    echo "VNC + websockify + Firefox services started"
+    echo "VNC + websockify + Firefox started"
 else
     echo "VNC already running — skipping restart"
     systemctl is-active --quiet websockify || systemctl start websockify
     systemctl is-active --quiet firefox-vnc || systemctl start firefox-vnc
 fi
 REMOTE
+                    _recover_done
                     return 0
                 fi
                 sleep 5
@@ -1326,6 +1325,7 @@ REMOTE
             done
 
             echo "[$(date '+%H:%M:%S')] WARNING: SSH did not respond after recovery" >> "$wlog"
+            _recover_done
             return 1
         }
 
@@ -1335,46 +1335,46 @@ REMOTE
 
         sleep 120  # grace period during boot
 
-while true; do
-    sleep 20
+        while true; do
+            sleep 20
 
-    [[ ! -f "$_BACKUP_DIR/$vm_name.pid" ]] && {
-        echo "[$(date '+%H:%M:%S')] PID file missing — restarting..." >> "$watchdog_log"
-        if [[ $recovery_count -ge $max_recoveries ]]; then
-            echo "[$(date '+%H:%M:%S')] Max recoveries reached. Stopping." >> "$watchdog_log"
-            exit 1
-        fi
-        ((recovery_count++))
-        recover_local "$vm_name" "true"
-        continue
-    }
+            if [[ ! -f "$_BACKUP_DIR/$vm_name.pid" ]]; then
+                echo "[$(date '+%H:%M:%S')] PID file missing — restarting..." >> "$watchdog_log"
+                if [[ $recovery_count -ge $max_recoveries ]]; then
+                    echo "[$(date '+%H:%M:%S')] Max recoveries reached. Stopping." >> "$watchdog_log"
+                    exit 1
+                fi
+                ((recovery_count++))
+                recover_local "$vm_name" "true"
+                continue
+            fi
 
-    local pid
-    pid=$(cat "$_BACKUP_DIR/$vm_name.pid" 2>/dev/null) || {
-        echo "[$(date '+%H:%M:%S')] Could not read PID file — restarting..." >> "$watchdog_log"
-        if [[ $recovery_count -ge $max_recoveries ]]; then
-            echo "[$(date '+%H:%M:%S')] Max recoveries reached. Stopping." >> "$watchdog_log"
-            exit 1
-        fi
-        ((recovery_count++))
-        recover_local "$vm_name" "true"
-        continue
-    }
+            local pid
+            pid=$(cat "$_BACKUP_DIR/$vm_name.pid" 2>/dev/null) || {
+                echo "[$(date '+%H:%M:%S')] Could not read PID file — restarting..." >> "$watchdog_log"
+                if [[ $recovery_count -ge $max_recoveries ]]; then
+                    echo "[$(date '+%H:%M:%S')] Max recoveries reached. Stopping." >> "$watchdog_log"
+                    exit 1
+                fi
+                ((recovery_count++))
+                recover_local "$vm_name" "true"
+                continue
+            }
 
-if ! kill -0 "$pid" 2>/dev/null; then
-    echo "[$(date '+%H:%M:%S')] QEMU process died — restarting..." >> "$watchdog_log"
-    if [[ $recovery_count -ge $max_recoveries ]]; then
-        echo "[$(date '+%H:%M:%S')] Max recoveries reached. Stopping." >> "$watchdog_log"
-        exit 1
-    fi
-    ((recovery_count++))
-    if recover_local "$vm_name" "true"; then
-        echo "[$(date '+%H:%M:%S')] Recovery complete" >> "$watchdog_log"
-        recovery_count=0
-        sleep 120
-    fi
-    continue
-fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+                echo "[$(date '+%H:%M:%S')] QEMU process died — restarting..." >> "$watchdog_log"
+                if [[ $recovery_count -ge $max_recoveries ]]; then
+                    echo "[$(date '+%H:%M:%S')] Max recoveries reached. Stopping." >> "$watchdog_log"
+                    exit 1
+                fi
+                ((recovery_count++))
+                if recover_local "$vm_name" "true"; then
+                    echo "[$(date '+%H:%M:%S')] Recovery complete" >> "$watchdog_log"
+                    recovery_count=0
+                    sleep 120
+                fi
+                continue
+            fi
 
             if ! check_ssh_local "$_SSH_PORT"; then
                 local stale=0
@@ -1404,7 +1404,7 @@ fi
                         exit 1
                     fi
                 else
-                    echo "[$(date '+%H:%M:%S')] SSH down, serial active (${stale}s) — rebooting?" >> "$watchdog_log"
+                    echo "[$(date '+%H:%M:%S')] SSH down, serial active (${stale}s) — booting?" >> "$watchdog_log"
                 fi
             else
                 recovery_count=0
@@ -1412,6 +1412,7 @@ fi
         done
 
     ) >> "$watchdog_log" 2>&1 &
+    echo $! > "$watchdog_pid_file"
     disown
     print_status "SUCCESS" "Freeze watchdog running (checks every 20s)"
 }
@@ -1449,7 +1450,7 @@ ssh_into_vm() {
 }
 
 # ============================================================================
-# SETUP VM IMAGE (first time)
+# SETUP VM IMAGE
 # ============================================================================
 setup_vm_image() {
     print_status "INFO" "Downloading and preparing image..."
@@ -1545,7 +1546,7 @@ write_files:
 runcmd:
   - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - for f in /etc/ssh/sshd_config.d/*.conf; do sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' "$f" 2>/dev/null || true; done
+  - for f in /etc/ssh/sshd_config.d/*.conf; do sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' "\$f" 2>/dev/null || true; done
   - id $USERNAME || useradd -m -s /bin/bash -G sudo $USERNAME
   - echo "$USERNAME:$PASSWORD" | chpasswd
   - echo "root:$PASSWORD" | chpasswd
@@ -1700,11 +1701,11 @@ EOF
     fi
 
     rm -f "$BACKUP_DIR/$vm_name.serial.log"
+    rm -f "$BACKUP_DIR/$vm_name.recovery.lock"
     > "$BACKUP_DIR/$vm_name.watchdog.log"
     ssh-keygen -R "[localhost]:$SSH_PORT" 2>/dev/null || true
     ssh-keygen -R "localhost" 2>/dev/null || true
 
-    # Wipe tmpfs before starting — ensure no leftover files from previous session
     print_status "INFO" "Cleaning tmpfs before start..."
     rm -rf "${SNAPSHOT_DIR:?}"/*
     mkdir -p "${SNAPSHOT_DIR:?}"
@@ -1747,12 +1748,18 @@ EOF
 stop_vm() {
     local vm_name=$1
     if ! load_vm_config "$vm_name"; then return 1; fi
+
     local watchdog_pid_file="$BACKUP_DIR/$vm_name.watchdog.pid"
     if [[ -f "$watchdog_pid_file" ]]; then
-        kill "$(cat "$watchdog_pid_file" 2>/dev/null)" 2>/dev/null || true
+        local wpid
+        wpid=$(cat "$watchdog_pid_file" 2>/dev/null || true)
+        [[ -n "$wpid" ]] && kill "$wpid" 2>/dev/null || true
         rm -f "$watchdog_pid_file"
     fi
+
+    rm -f "$BACKUP_DIR/$vm_name.recovery.lock"
     kill_vm "$vm_name"
+    print_status "SUCCESS" "VM '$vm_name' stopped"
 }
 
 # ============================================================================
@@ -1770,7 +1777,7 @@ attach_watchdog() {
     local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
     echo "[$(date '+%H:%M:%S')] Watchdog manually attached" >> "$watchdog_log"
     start_freeze_watchdog "$vm_name"
-    print_status "SUCCESS" "Watchdog loop attached"
+    print_status "SUCCESS" "Watchdog attached"
     print_status "INFO"    "Monitor: tail -f $watchdog_log"
 }
 
@@ -1840,11 +1847,17 @@ delete_vm() {
     read -p "$(print_status "INPUT" "Are you sure? (y/N): ")" -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
+        local watchdog_pid_file="$BACKUP_DIR/$vm_name.watchdog.pid"
+        if [[ -f "$watchdog_pid_file" ]]; then
+            kill "$(cat "$watchdog_pid_file" 2>/dev/null)" 2>/dev/null || true
+            rm -f "$watchdog_pid_file"
+        fi
         is_vm_running "$vm_name" && kill_vm "$vm_name"
         rm -f "$LIVE_IMG" "$SNAPSHOT_COMPRESSED"
         rm -f "${SNAPSHOT_COMPRESSED}.compressing" "$SEED_FILE"
         rm -f "$BACKUP_DIR/$vm_name.conf" "$BACKUP_DIR/$vm_name.pid"
         rm -f "$BACKUP_DIR/$vm_name.serial.log" "$BACKUP_DIR/$vm_name.watchdog.log"
+        rm -f "$BACKUP_DIR/$vm_name.watchdog.pid" "$BACKUP_DIR/$vm_name.recovery.lock"
         print_status "SUCCESS" "VM '$vm_name' deleted"
     else
         print_status "INFO" "Cancelled"
@@ -2100,10 +2113,8 @@ main_menu() {
 trap cleanup EXIT
 check_dependencies
 
-# Ensure BACKUP_DIR exists
 mkdir -p "$BACKUP_DIR"
 
-# Ensure SNAPSHOT_DIR exists and is mounted as tmpfs
 if ! mountpoint -q "$SNAPSHOT_DIR" 2>/dev/null; then
     mkdir -p "$SNAPSHOT_DIR"
     mount -t tmpfs -o size=16G tmpfs "$SNAPSHOT_DIR" 2>/dev/null || true
