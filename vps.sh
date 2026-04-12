@@ -282,7 +282,7 @@ apply_post_boot_fixes() {
     print_status "INFO" "Applying post-boot hardening + network tuning + starting services..."
     local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
 
-    sshpass -p "$pass" ssh $ssh_opts -p "$port" "${_USERNAME}@localhost" bash <<'REMOTE'
+    sshpass -p "$pass" ssh $ssh_opts -p "$port" "${user}@localhost" bash <<'REMOTE'
 set -e
 
 # ---- Journald volatile (prevents journal I/O freeze) ----
@@ -419,7 +419,7 @@ REMOTE
 
     # ---- VNC + websockify + Firefox — separate root SSH call ----
     print_status "INFO" "Setting up VNC + Firefox auto-restore..."
-    sshpass -p "$pass" ssh $ssh_opts -p "$port" "${_USERNAME}@localhost" bash <<REMOTE
+    sshpass -p "$pass" ssh $ssh_opts -p "$port" "root@localhost" bash <<REMOTE
 set -e
 
 # ---- Fix Docker bridge linkdown (permanent) ----
@@ -1159,7 +1159,7 @@ fi
 
 # ---- Enable OPcache ----
 sudo apt install -y php\${PHP_VER}-opcache 2>/dev/null || true
-sudo tee /etc/php/\${PHP_VER}/mods-available/opcache.ini > /dev/null <<'OPCEOF'
+sudo tee /etc/php/${PHP_VER}/mods-available/opcache.ini > /dev/null <<OPCEOF
 zend_extension=opcache
 opcache.enable=1
 opcache.enable_cli=0
@@ -1175,7 +1175,6 @@ OPCEOF
 sudo phpenmod -v \${PHP_VER} opcache 2>/dev/null || true
 sudo systemctl restart php\${PHP_VER}-fpm 2>/dev/null || true
 
-# ---- Restart Pelican if installed ----
 # ---- Restart Pelican if installed ----
 if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
     curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh
