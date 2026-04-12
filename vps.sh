@@ -409,7 +409,7 @@ sudo systemctl restart php\${PHP_VER}-fpm 2>/dev/null || true
 # ---- Restart Pelican if installed ----
 if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
     curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh
-    nohup bash /tmp/nexus-restart.sh > /var/log/nexus-restart.log 2>&1 &
+    nohup bash /tmp/nexus-restart.sh </dev/null > /var/log/nexus-restart.log 2>&1 &
     disown
     echo "restart.sh launched in background (PID $!)"
     rm -f /tmp/nexus-restart.sh
