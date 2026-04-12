@@ -282,7 +282,7 @@ apply_post_boot_fixes() {
     print_status "INFO" "Applying post-boot hardening + network tuning + starting services..."
     local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
 
-    sshpass -p "$pass" ssh $ssh_opts -p "$port" "${user}@localhost" bash <<'REMOTE'
+    sshpass -p "$pass" ssh $ssh_opts -p "$port" "root@localhost" bash <<'REMOTE'
 set -e
 
 # ---- Journald volatile (prevents journal I/O freeze) ----
@@ -419,6 +419,28 @@ REMOTE
     print_status "INFO" "Setting up VNC + Firefox auto-restore..."
     sshpass -p "$pass" ssh $ssh_opts -p "$port" "root@localhost" bash <<REMOTE
 set -e
+
+# ---- Fix Docker bridge linkdown (permanent) ----
+if [ ! -f /etc/systemd/system/fix-docker-bridges.service ]; then
+    cat > /etc/systemd/system/fix-docker-bridges.service <<'BRIDGESVC'
+[Unit]
+Description=Fix Docker bridge interfaces linkdown
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'ip link set docker0 up 2>/dev/null || true; ip link set pelican0 up 2>/dev/null || true'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+BRIDGESVC
+    systemctl daemon-reload
+    systemctl enable fix-docker-bridges
+    systemctl start fix-docker-bridges
+    echo "fix-docker-bridges service installed"
+fi
 
 # Write Firefox user.js for silent session restore
 FIREFOX_PROFILE=\$(find /root/.config/mozilla/firefox -maxdepth 1 -name "*.default-release" -type d 2>/dev/null | head -1)
@@ -604,7 +626,7 @@ wait_for_ssh() {
     local max_wait=120
     local elapsed=0
     local recovery_count=0
-    local max_recoveries=3
+    local max_recoveries=5
     local serial_log="$BACKUP_DIR/$vm_name.serial.log"
     local watchdog_log="$BACKUP_DIR/$vm_name.watchdog.log"
 
@@ -862,7 +884,7 @@ start_freeze_watchdog() {
             fi
         }
 
-        recover_local() {
+recover_local() {
     local vm=$1
     local skip_image=${2:-false}
     local live_img="$_BACKUP_DIR/$vm.img"
@@ -870,10 +892,10 @@ start_freeze_watchdog() {
     local serial="$_BACKUP_DIR/$vm.serial.log"
     local wlog="$_BACKUP_DIR/$vm.watchdog.log"
 
-    echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$wlog"
-
-    # Trap to always log if recovery subshell crashes
+    # Trap MUST come after wlog is defined
     trap 'echo "[$(date +%H:%M:%S)] FATAL: Recovery subshell crashed unexpectedly" >> "$wlog"' EXIT
+
+    echo "[$(date '+%H:%M:%S')] ===== FREEZE RECOVERY STARTED =====" >> "$wlog"
 
     # Step 1 — Kill the frozen VM first
     echo "[$(date '+%H:%M:%S')] Step 1: Killing frozen VM..." >> "$wlog"
@@ -1028,12 +1050,12 @@ echo "[$(date '+%H:%M:%S')] SSH ready — running full post-boot setup..." >> "$
                     sleep 10
 
                     # ---- User fixes (BBR, docker, journald, tailscale, sshx, pelican) ----
-                    sshpass -p "$_PASSWORD" ssh \
+                        sshpass -p "$_PASSWORD" ssh \
                         -o StrictHostKeyChecking=no \
                         -o UserKnownHostsFile=/dev/null \
                         -o ConnectTimeout=15 \
                         -o LogLevel=ERROR \
-                        -p "$_SSH_PORT" "${_USERNAME}@localhost" bash <<REMOTE >> "$wlog" 2>&1
+                        -p "$_SSH_PORT" "root@localhost" bash <<REMOTE >> "$wlog" 2>&1
 set -e
 
 sudo mkdir -p /etc/systemd/journald.conf.d
@@ -1325,7 +1347,11 @@ if ! kill -0 "$pid" 2>/dev/null; then
         exit 1
     fi
     ((recovery_count++))
-    recover_local "$vm_name" "true"
+    if recover_local "$vm_name" "true"; then
+        echo "[$(date '+%H:%M:%S')] Recovery complete" >> "$watchdog_log"
+        recovery_count=0
+        sleep 120
+    fi
     continue
 fi
 

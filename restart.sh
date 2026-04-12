@@ -386,12 +386,13 @@ if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
     systemctl start wings 2>/dev/null
 
     # Wait for Wings to actually bind on port 8080 before starting Cloudflare
-    echo -n "   Waiting for Wings on port 8080"
-    for i in {1..15}; do
+echo -n "   Waiting for Wings on port 8080"
+    for i in {1..10}; do
         sleep 2
         echo -n "."
         ss -tlnp 2>/dev/null | grep -q ":8080" && { echo ""; break; }
     done
+    echo ""
     if systemctl is-active --quiet wings; then
         echo -e "${GREEN}   ✓ Wings started${NC}"
         ss -tlnp 2>/dev/null | grep -q ":8080" && \
