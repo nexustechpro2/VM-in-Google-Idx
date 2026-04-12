@@ -408,9 +408,11 @@ sudo systemctl restart php\${PHP_VER}-fpm 2>/dev/null || true
 
 # ---- Restart Pelican if installed ----
 if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
-    curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh \
-        && sudo bash /tmp/nexus-restart.sh \
-        && rm -f /tmp/nexus-restart.sh
+    curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh
+    nohup bash /tmp/nexus-restart.sh > /var/log/nexus-restart.log 2>&1 &
+    disown
+    echo "restart.sh launched in background (PID $!)"
+    rm -f /tmp/nexus-restart.sh
     sudo systemctl restart cloudflared || true
 fi
 REMOTE
@@ -1174,10 +1176,12 @@ sudo phpenmod -v \${PHP_VER} opcache 2>/dev/null || true
 sudo systemctl restart php\${PHP_VER}-fpm 2>/dev/null || true
 
 # ---- Restart Pelican if installed ----
+# ---- Restart Pelican if installed ----
 if [[ -f /root/.pelican.env ]] || [[ -f /var/www/pelican/.env ]]; then
-    curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh \
-        && sudo bash /tmp/nexus-restart.sh \
-        && rm -f /tmp/nexus-restart.sh
+    curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh
+    nohup bash /tmp/nexus-restart.sh > /var/log/nexus-restart.log 2>&1 &
+    disown
+    echo "restart.sh launched in background (PID $!)"
     sudo systemctl restart cloudflared || true
 fi
 REMOTE
@@ -1310,7 +1314,7 @@ REMOTE
 
         # ---- Watchdog main loop ----
         local recovery_count=0
-        local max_recoveries=3
+        local max_recoveries=5
 
         sleep 120  # grace period during boot
 
