@@ -282,7 +282,7 @@ apply_post_boot_fixes() {
     print_status "INFO" "Applying post-boot hardening + network tuning + starting services..."
     local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
 
-    sshpass -p "$pass" ssh $ssh_opts -p "$port" "root@localhost" bash <<'REMOTE'
+    sshpass -p "$pass" ssh $ssh_opts -p "$port" "${_USERNAME}@localhost" bash <<'REMOTE'
 set -e
 
 # ---- Journald volatile (prevents journal I/O freeze) ----
@@ -419,7 +419,7 @@ REMOTE
 
     # ---- VNC + websockify + Firefox — separate root SSH call ----
     print_status "INFO" "Setting up VNC + Firefox auto-restore..."
-    sshpass -p "$pass" ssh $ssh_opts -p "$port" "root@localhost" bash <<REMOTE
+    sshpass -p "$pass" ssh $ssh_opts -p "$port" "${_USERNAME}@localhost" bash <<REMOTE
 set -e
 
 # ---- Fix Docker bridge linkdown (permanent) ----
@@ -1057,7 +1057,7 @@ echo "[$(date '+%H:%M:%S')] SSH ready — running full post-boot setup..." >> "$
                         -o UserKnownHostsFile=/dev/null \
                         -o ConnectTimeout=15 \
                         -o LogLevel=ERROR \
-                        -p "$_SSH_PORT" "root@localhost" bash <<REMOTE >> "$wlog" 2>&1
+                        -p "$_SSH_PORT" "${_USERNAME}@localhost" bash <<REMOTE >> "$wlog" 2>&1
 set -e
 
 sudo mkdir -p /etc/systemd/journald.conf.d
@@ -1192,7 +1192,7 @@ REMOTE
                         -o UserKnownHostsFile=/dev/null \
                         -o ConnectTimeout=15 \
                         -o LogLevel=ERROR \
-                        -p "$_SSH_PORT" "root@localhost" bash <<REMOTE >> "$wlog" 2>&1
+                        -p "$_SSH_PORT" "${_USERNAME}@localhost" bash <<REMOTE >> "$wlog" 2>&1
 set -e
 
 FIREFOX_PROFILE=\$(find /root/.config/mozilla/firefox -maxdepth 1 -name "*.default-release" -type d 2>/dev/null | head -1)
