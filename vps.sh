@@ -402,7 +402,7 @@ if [ "\$PELICAN_FOUND" = "true" ]; then
     echo "Pelican detected — downloading and running restart.sh..."
     if curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh 2>/dev/null; then
         chmod +x /tmp/nexus-restart.sh
-        sudo bash /tmp/nexus-restart.sh </dev/null > /var/log/nexus-restart.log 2>&1 &
+        sudo bash -c "bash /tmp/nexus-restart.sh </dev/null > /var/log/nexus-restart.log 2>&1" &
         RESTART_PID=\$!
         echo "restart.sh launched (PID \$RESTART_PID)"
         sleep 8
@@ -1179,7 +1179,7 @@ if [ "\$PELICAN_FOUND" = "true" ]; then
     echo "Pelican detected — running restart.sh..."
     if curl -fsSL "\${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh 2>/dev/null; then
         chmod +x /tmp/nexus-restart.sh
-        sudo bash /tmp/nexus-restart.sh </dev/null > /var/log/nexus-restart.log 2>&1 &
+        sudo bash -c "bash /tmp/nexus-restart.sh </dev/null > /var/log/nexus-restart.log 2>&1" &
         RESTART_PID=\$!
         echo "restart.sh launched (PID \$RESTART_PID)"
         sleep 8
