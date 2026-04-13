@@ -216,7 +216,26 @@ ip link set docker0 up 2>/dev/null || true
 ip link set pelican0 up 2>/dev/null || true
 echo -e "${GREEN}   ✓ Docker bridges brought up (docker0, pelican0)${NC}"
 
+# Unmask and start dnsmasq safely
+systemctl unmask dnsmasq 2>/dev/null || true
+
+# Wait for 172.18.0.1 to be assigned to pelican0 before starting dnsmasq
+echo -n "   Waiting for pelican0 IP"
+for i in {1..15}; do
+    ip addr show pelican0 2>/dev/null | grep -q "172.18.0.1" && break
+    sleep 1
+    echo -n "."
+done
+echo ""
+
+# Ensure systemd-resolved isn't blocking port 53
+mkdir -p /etc/systemd/resolved.conf.d/
+echo -e "[Resolve]\nDNSStubListener=no" > /etc/systemd/resolved.conf.d/no-stub.conf
+systemctl restart systemd-resolved 2>/dev/null || true
+sleep 1
+
 systemctl restart dnsmasq 2>/dev/null || true
+systemctl enable dnsmasq 2>/dev/null || true
 
 # ============================================================================
 # 2. START REDIS
