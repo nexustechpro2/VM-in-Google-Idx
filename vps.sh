@@ -719,7 +719,7 @@ freeze_recovery() {
     echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$watchdog_log"
     local tmp_c="${snap_compressed}.compressing"
     rm -f "$tmp_c" "$snap_compressed"
-    if ! qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$live_img" "$tmp_c" >> "$watchdog_log" 2>&1; then
+    if ! qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$live_img" "$tmp_c"; then
         echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$watchdog_log"
         rm -f "$tmp_c"
         trap - EXIT
@@ -728,56 +728,27 @@ freeze_recovery() {
     mv "$tmp_c" "$snap_compressed"
     echo "[$(date '+%H:%M:%S')] Compressed: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$watchdog_log"
 
-    echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home..." >> "$watchdog_log"
-    local restore_tmp="${live_img}.restoring"
-    rm -f "$restore_tmp"
-    qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$snap_compressed" "$restore_tmp" >> "$watchdog_log" 2>&1 &
-    local compress_pid=$!
-    local elapsed=0
-    local success=false
-
-    while [[ $elapsed -lt 1200 ]]; do
-        if ! kill -0 "$compress_pid" 2>/dev/null; then
-            if [[ -f "$restore_tmp" ]] && [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -gt 0 ]] && \
-               qemu-img check "$restore_tmp" >> "$watchdog_log" 2>&1; then
-                success=true
-            else
-                echo "[$(date '+%H:%M:%S')] Step 3: Output invalid — falling back to direct copy" >> "$watchdog_log"
-            fi
-            break
-        fi
-        sleep 5
-        elapsed=$((elapsed + 5))
-    done
-
-    if [[ "$success" == false ]]; then
-        kill "$compress_pid" 2>/dev/null || true
-        wait "$compress_pid" 2>/dev/null || true
-        rm -f "$restore_tmp"
-        echo "[$(date '+%H:%M:%S')] Copying directly from tmpfs..." >> "$watchdog_log"
-        if ! cp "$snap_compressed" "$restore_tmp"; then
-            echo "[$(date '+%H:%M:%S')] ERROR: Direct copy failed" >> "$watchdog_log"
-            trap - EXIT
-            return 1
-        fi
-        if [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -eq 0 ]]; then
-            echo "[$(date '+%H:%M:%S')] ERROR: Direct copy produced 0 byte file" >> "$watchdog_log"
-            rm -f "$restore_tmp"
-            trap - EXIT
-            return 1
-        fi
-        if ! qemu-img check "$restore_tmp" >> "$watchdog_log" 2>&1; then
-            rm -f "$restore_tmp"
-            echo "[$(date '+%H:%M:%S')] ERROR: Direct copy verification failed" >> "$watchdog_log"
-            trap - EXIT
-            return 1
-        fi
-    fi
-
-    rm -f "$live_img"
-    mv "$restore_tmp" "$live_img"
-    echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$watchdog_log"
+    echo "[$(date '+%H:%M:%S')] Step 3: Deleting original and copying back from tmpfs..." >> "$watchdog_log"
+rm -f "$live_img"
+if ! cp "$snap_compressed" "$live_img"; then
+    echo "[$(date '+%H:%M:%S')] ERROR: Copy back failed" >> "$watchdog_log"
     trap - EXIT
+    return 1
+fi
+if [[ $(stat -c%s "$live_img" 2>/dev/null || echo 0) -eq 0 ]]; then
+    echo "[$(date '+%H:%M:%S')] ERROR: Copy produced 0 byte file" >> "$watchdog_log"
+    rm -f "$live_img"
+    trap - EXIT
+    return 1
+fi
+if ! qemu-img check "$live_img" >> "$watchdog_log" 2>&1; then
+    echo "[$(date '+%H:%M:%S')] ERROR: Image verification failed" >> "$watchdog_log"
+    rm -f "$live_img"
+    trap - EXIT
+    return 1
+fi
+echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$watchdog_log"
+trap - EXIT
 
     echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$watchdog_log"
     rm -rf "${SNAPSHOT_DIR:?}"/*
@@ -923,7 +894,7 @@ start_freeze_watchdog() {
                 echo "[$(date '+%H:%M:%S')] Step 2: Compressing live image to tmpfs..." >> "$wlog"
                 local tmp_c="${snap_compressed}.compressing"
                 rm -f "$tmp_c" "$snap_compressed"
-                if ! qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$live_img" "$tmp_c" >> "$wlog" 2>&1; then
+                if ! qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$live_img" "$tmp_c"; then
                     echo "[$(date '+%H:%M:%S')] ERROR: Compression to tmpfs failed" >> "$wlog"
                     rm -f "$tmp_c"
                     _recover_done
@@ -932,58 +903,28 @@ start_freeze_watchdog() {
                 mv "$tmp_c" "$snap_compressed"
                 echo "[$(date '+%H:%M:%S')] Compressed: $(du -sh "$snap_compressed" 2>/dev/null | awk '{print $1}')" >> "$wlog"
 
-                # Step 3 — Compress back to /home
-                echo "[$(date '+%H:%M:%S')] Step 3: Compressing back to /home (20 min timeout)..." >> "$wlog"
-                local restore_tmp="${live_img}.restoring"
-                rm -f "$restore_tmp"
-                qemu-img convert -p -O qcow2 -c -o compression_type=zstd,cluster_size=2M "$snap_compressed" "$restore_tmp" >> "$wlog" 2>&1 &
-                local compress_pid=$!
-                local elapsed=0
-                local success=false
-
-                while [[ $elapsed -lt 1200 ]]; do
-                    if ! kill -0 "$compress_pid" 2>/dev/null; then
-                        if [[ -f "$restore_tmp" ]] && [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -gt 0 ]] && \
-                           qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
-                            success=true
-                        else
-                            echo "[$(date '+%H:%M:%S')] Step 3: Output invalid — falling back to direct copy" >> "$wlog"
-                        fi
-                        break
-                    fi
-                    sleep 5
-                    elapsed=$((elapsed + 5))
-                done
-
-                if [[ "$success" == false ]]; then
-                    kill "$compress_pid" 2>/dev/null || true
-                    wait "$compress_pid" 2>/dev/null || true
-                    rm -f "$restore_tmp"
-                    echo "[$(date '+%H:%M:%S')] Copying directly from tmpfs..." >> "$wlog"
-                    if ! cp "$snap_compressed" "$restore_tmp"; then
-                        echo "[$(date '+%H:%M:%S')] ERROR: Direct copy failed" >> "$wlog"
-                        _recover_done
-                        return 1
-                    fi
-                    if [[ $(stat -c%s "$restore_tmp" 2>/dev/null || echo 0) -eq 0 ]]; then
-                        echo "[$(date '+%H:%M:%S')] ERROR: Direct copy produced 0 byte file" >> "$wlog"
-                        rm -f "$restore_tmp"
-                        _recover_done
-                        return 1
-                    fi
-                    if ! qemu-img check "$restore_tmp" >> "$wlog" 2>&1; then
-                        rm -f "$restore_tmp"
-                        echo "[$(date '+%H:%M:%S')] ERROR: Direct copy verification failed" >> "$wlog"
-                        _recover_done
-                        return 1
-                    fi
-                fi
-
+                # Step 3 — Deleting original and copying back from tmpfs.
+                echo "[$(date '+%H:%M:%S')] Step 3: Deleting original and copying back from tmpfs..." >> "$wlog"
                 rm -f "$live_img"
-                mv "$restore_tmp" "$live_img"
+                if ! cp "$snap_compressed" "$live_img"; then
+                    echo "[$(date '+%H:%M:%S')] ERROR: Copy back failed" >> "$wlog"
+                    _recover_done
+                    return 1
+                fi
+                if [[ $(stat -c%s "$live_img" 2>/dev/null || echo 0) -eq 0 ]]; then
+                    echo "[$(date '+%H:%M:%S')] ERROR: Copy produced 0 byte file" >> "$wlog"
+                    rm -f "$live_img"
+                    _recover_done
+                    return 1
+                fi
+                if ! qemu-img check "$live_img" >> "$wlog" 2>&1; then
+                    echo "[$(date '+%H:%M:%S')] ERROR: Image verification failed" >> "$wlog"
+                    rm -f "$live_img"
+                    _recover_done
+                    return 1
+                fi
                 echo "[$(date '+%H:%M:%S')] Live image restored and verified OK" >> "$wlog"
                 _recover_done
-
                 # Step 4 — Clear tmpfs
                 echo "[$(date '+%H:%M:%S')] Step 4: Clearing tmpfs..." >> "$wlog"
                 rm -rf "${_SNAPSHOT_DIR:?}"/*
