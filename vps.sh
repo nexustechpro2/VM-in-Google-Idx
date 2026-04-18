@@ -380,7 +380,8 @@ if [ -f "/etc/php/\${PHP_VER}/fpm/pool.d/www.conf" ]; then
 fi
 
 # ---- Enable OPcache ----
-sudo apt install -y php\${PHP_VER}-opcache 2>/dev/null || true
+sudo apt-get update -qq 2>/dev/null || true
+sudo apt install -y php${PHP_VER}-opcache 2>/dev/null || true
 sudo tee /etc/php/\${PHP_VER}/mods-available/opcache.ini > /dev/null <<OPCEOF
 zend_extension=opcache
 opcache.enable=1
@@ -470,7 +471,7 @@ fi
 
 if [ ! -f /root/.vnc/passwd ]; then
     VNC_PASS="${pass:0:8}"
-    echo "\$VNC_PASS" | vncpasswd -f > /root/.vnc/passwd
+    echo "$VNC_PASS" | vncpasswd -f > /root/.vnc/passwd   # ← fails if install above was skipped
     chmod 600 /root/.vnc/passwd
 fi
 
@@ -1157,8 +1158,12 @@ USERJS
 fi
 
 mkdir -p /root/.vnc
-if ! command -v vncserver &>/dev/null || ! command -v websockify &>/dev/null; then
+# Always ensure tightvncserver is present before touching passwd
+if ! command -v vncpasswd &>/dev/null; then
     apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify 2>/dev/null || true
+fi
+if ! command -v websockify &>/dev/null; then
+    apt-get install -y novnc websockify 2>/dev/null || true
 fi
 
 if [ ! -f /root/.vnc/passwd ]; then
