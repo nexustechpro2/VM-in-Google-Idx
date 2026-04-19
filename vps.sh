@@ -1167,9 +1167,7 @@ if ! command -v websockify &>/dev/null; then
 fi
 
 if [ ! -f /root/.vnc/passwd ]; then
-    VNC_PASS="${pass}"
-    VNC_PASS="\${VNC_PASS:0:8}"
-    echo "$VNC_PASS" | vncpasswd -f > /root/.vnc/passwd
+    echo "${_PASSWORD:0:8}" | vncpasswd -f > /root/.vnc/passwd
     chmod 600 /root/.vnc/passwd
 fi
 
