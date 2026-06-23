@@ -52,19 +52,10 @@ print_banner
 # STEP 1 — CHECK/SET ROOT PASSWORD
 # ============================================================
 print_step "Checking root password..."
-
 if passwd -S root | grep -q "^root P"; then
-    print_success "Root password is already set. Using existing password."
+    print_success "Root password is already set."
 else
-    print_warning "No root password found!"
-    echo -e "${YELLOW}Please set a root password now:${NC}"
-    passwd root
-    if [ $? -eq 0 ]; then
-        print_success "Root password set successfully!"
-    else
-        print_error "Failed to set root password. Exiting."
-        exit 1
-    fi
+    print_warning "No root password set — skipping (SSH key auth assumed)."
 fi
 
 # ============================================================
