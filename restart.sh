@@ -121,7 +121,6 @@ echo ""
 chattr -i /etc/resolv.conf 2>/dev/null || true
 cat > /etc/resolv.conf <<'DNSEOF'
 nameserver 1.1.1.1
-nameserver 8.8.8.8
 nameserver 8.8.4.4
 options timeout:2 attempts:2 rotate
 DNSEOF
@@ -403,6 +402,7 @@ if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
     fi
     systemctl reset-failed wings 2>/dev/null || true
     systemctl start wings 2>/dev/null
+    sed -i 's/    - 8.8.8.8$/    - 8.8.4.4/g' /etc/pelican/config.yml
 
     # Wait for Wings to actually bind on port 8080 before starting Cloudflare
 echo -n "   Waiting for Wings on port 8080"
