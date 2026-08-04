@@ -297,12 +297,17 @@ if command -v docker &>/dev/null; then
   "ip-forward": true,
   "ip-masq": true,
   "storage-driver": "overlay2",
-  "default-platform": "linux/arm64",
   "default-ulimits": {
     "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
   }
 }
 DF
+sudo mkdir -p /etc/systemd/system/docker.service.d/
+    sudo tee /etc/systemd/system/docker.service.d/platform.conf > /dev/null <<'EOF'
+[Service]
+Environment="DOCKER_DEFAULT_PLATFORM=linux/arm64"
+EOF
+    sudo systemctl daemon-reload
     sudo systemctl restart docker || true
 fi
 
@@ -1056,12 +1061,17 @@ if command -v docker &>/dev/null; then
   "ip-forward": true,
   "ip-masq": true,
   "storage-driver": "overlay2",
-  "default-platform": "linux/arm64",
   "default-ulimits": {
     "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
   }
 }
 DF
+sudo mkdir -p /etc/systemd/system/docker.service.d/
+    sudo tee /etc/systemd/system/docker.service.d/platform.conf > /dev/null <<'EOF'
+[Service]
+Environment="DOCKER_DEFAULT_PLATFORM=linux/arm64"
+EOF
+    sudo systemctl daemon-reload
     sudo systemctl restart docker || true
 fi
 
@@ -1518,7 +1528,6 @@ write_files:
         "ip-forward": true,
         "ip-masq": true,
         "storage-driver": "overlay2",
-        "default-platform": "linux/arm64",
         "default-ulimits": {
           "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
         }
@@ -1559,6 +1568,8 @@ runcmd:
   - systemctl stop dnsmasq 2>/dev/null || true
   - systemctl disable dnsmasq 2>/dev/null || true
   - systemctl mask dnsmasq 2>/dev/null || true
+  - mkdir -p /etc/systemd/system/docker.service.d && printf '[Service]\nEnvironment="DOCKER_DEFAULT_PLATFORM=linux/arm64"\n' > /etc/systemd/system/docker.service.d/platform.conf
+  - systemctl daemon-reload
   - systemctl disable snapd snapd.socket NetworkManager rsyslog tailscaled avahi-daemon 2>/dev/null || true
   - groupadd docker 2>/dev/null || true
   - mkdir -p /etc/systemd/network
