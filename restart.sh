@@ -140,7 +140,6 @@ nameserver 1.1.1.1
 nameserver 8.8.4.4
 options timeout:2 attempts:2 rotate
 DNSEOF
-chattr +i /etc/resolv.conf
 
 # Ensure hostname resolves locally (prevents sudo warnings + DNS cascade failures)
 grep -q "$(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >> /etc/hosts
