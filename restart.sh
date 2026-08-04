@@ -191,12 +191,18 @@ cat > /etc/docker/daemon.json <<'DOCKEREOF'
   "ip-forward": true,
   "ip-masq": true,
   "storage-driver": "overlay2",
-  "default-platform": "linux/arm64",
   "default-ulimits": {
     "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
   }
 }
 DOCKEREOF
+
+mkdir -p /etc/systemd/system/docker.service.d/
+cat > /etc/systemd/system/docker.service.d/platform.conf <<'EOF'
+[Service]
+Environment="DOCKER_DEFAULT_PLATFORM=linux/arm64"
+EOF
+systemctl daemon-reload
 
 HAS_SYSTEMD=false
 if [ -d /run/systemd/system ] && pidof systemd >/dev/null 2>&1; then
@@ -225,7 +231,7 @@ done
 echo ""
 
 # Ensure /var/run/docker.sock symlink exists (Wings uses this path)
-if [ -S /run/docker.sock ]; then
+if [ -S /run/docker.sock ] && [ ! -L /var/run/docker.sock ]; then
     ln -sf /run/docker.sock /var/run/docker.sock
     echo -e "${GREEN}   ✓ Created /var/run/docker.sock symlink${NC}"
 fi
@@ -433,7 +439,7 @@ if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
         systemctl start docker 2>/dev/null || true
         sleep 5
         # Re-create symlink if needed
-        if [ -S /run/docker.sock ]; then
+   if [ -S /run/docker.sock ] && [ ! -L /var/run/docker.sock ]; then
     ln -sf /run/docker.sock /var/run/docker.sock
         fi
         ip link set docker0 up 2>/dev/null || true
