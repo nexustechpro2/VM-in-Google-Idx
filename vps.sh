@@ -1538,6 +1538,7 @@ write_files:
       net.ipv4.tcp_tw_reuse=1
       net.ipv4.tcp_fin_timeout=15
 runcmd:
+- rm -f /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
   - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
   - for f in /etc/ssh/sshd_config.d/*.conf; do sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' "\$f" 2>/dev/null || true; done
