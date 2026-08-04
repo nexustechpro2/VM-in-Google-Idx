@@ -199,7 +199,7 @@ build_and_run_qemu() {
         -device "virtio-blk-pci,drive=hd0,iothread=io0" \
         -drive "file=$seed_file,format=raw,if=virtio,cache=writeback" \
         -boot order=c \
-        -device "virtio-net-pci,netdev=n0,rx_queue_size=256,tx_queue_size=256,romfile=,host_mtu=1500" \
+        -device "virtio-net-pci,netdev=n0,rx_queue_size=256,tx_queue_size=256,romfile=,host_mtu=1280" \
         -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22,dns=8.8.8.8${netdev_extra}" \
         -object rng-random,filename=/dev/urandom,id=rng0 \
         -device virtio-rng-pci,rng=rng0 \
@@ -288,8 +288,7 @@ if command -v docker &>/dev/null; then
     sudo mkdir -p /etc/docker
     sudo tee /etc/docker/daemon.json > /dev/null <<'DF'
 {
-"dns": ["172.18.0.1"],
-"dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
+"dns": ["8.8.8.8", "1.1.1.1"],
 "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
@@ -464,6 +463,18 @@ USERJS
     echo "Firefox user.js written to \$FIREFOX_PROFILE"
 fi
 
+# ---- Pin DNS via systemd-resolved ----
+mkdir -p /etc/systemd/resolved.conf.d
+tee /etc/systemd/resolved.conf.d/nexus.conf > /dev/null <<'RESOLV'
+[Resolve]
+DNS=8.8.8.8 1.1.1.1
+FallbackDNS=8.8.4.4
+DNSStubListener=no
+RESOLV
+systemctl restart systemd-resolved 2>/dev/null || true
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+
 # ---- VNC setup ----
 mkdir -p /root/.vnc
 if ! command -v vncserver &>/dev/null || ! command -v websockify &>/dev/null; then
@@ -537,13 +548,34 @@ User=root
 Environment=DISPLAY=:1
 Environment=HOME=/root
 ExecStartPre=/bin/sleep 5
-ExecStart=/usr/bin/firefox --display=:1
+ExecStartPre=/bin/bash -c 'mkdir -p /tmp/firefox-cache && mkdir -p /tmp/firefox-ipc'
+ExecStart=/usr/bin/firefox --display=:1 --no-remote --profile /tmp/firefox-profile \
+  -MOZ_DISABLE_CONTENT_SANDBOX=1
+Environment=MOZ_DISABLE_CRASHREPORTER=1
+Environment=MOZ_CRASHREPORTER_DISABLE=1
 Restart=on-failure
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 FFVSVC
+
+# Move Firefox cache and profile to tmpfs
+mkdir -p /tmp/firefox-profile
+cat > /tmp/firefox-profile/user.js <<'FFJS'
+user_pref("browser.cache.disk.enable", false);
+user_pref("browser.cache.memory.enable", true);
+user_pref("browser.cache.memory.capacity", 524288);
+user_pref("browser.sessionstore.interval", 3600000);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.privatebrowsing.autostart", false);
+user_pref("toolkit.storage.synchronous", 0);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);
+user_pref("dom.ipc.processCount", 1);
+user_pref("browser.tabs.remote.autostart", false);
+FFJS
 
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
@@ -965,7 +997,7 @@ start_freeze_watchdog() {
             qcmd+=" -device virtio-blk-pci,drive=hd0,iothread=io0"
             qcmd+=" -drive file=$_BACKUP_DIR/$vm-seed.iso,format=raw,if=virtio,cache=writeback"
             qcmd+=" -boot order=c"
-            qcmd+=" -device virtio-net-pci,netdev=n0,rx_queue_size=256,tx_queue_size=256,romfile=,host_mtu=1500"
+            qcmd+=" -device virtio-net-pci,netdev=n0,rx_queue_size=256,tx_queue_size=256,romfile=,host_mtu=1280"
             qcmd+=" -netdev user,id=n0,hostfwd=tcp::${_SSH_PORT}-:22,dns=8.8.8.8${pf_extra}"
             qcmd+=" -object rng-random,filename=/dev/urandom,id=rng0"
             qcmd+=" -device virtio-rng-pci,rng=rng0"
@@ -1014,8 +1046,7 @@ if command -v docker &>/dev/null; then
     sudo mkdir -p /etc/docker
     sudo tee /etc/docker/daemon.json > /dev/null <<'DF'
 {
-"dns": ["172.18.0.1"],
-"dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
+"dns": ["8.8.8.8", "1.1.1.1"],
 "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
@@ -1234,13 +1265,34 @@ User=root
 Environment=DISPLAY=:1
 Environment=HOME=/root
 ExecStartPre=/bin/sleep 5
-ExecStart=/usr/bin/firefox --display=:1
+ExecStartPre=/bin/bash -c 'mkdir -p /tmp/firefox-cache && mkdir -p /tmp/firefox-ipc'
+ExecStart=/usr/bin/firefox --display=:1 --no-remote --profile /tmp/firefox-profile \
+  -MOZ_DISABLE_CONTENT_SANDBOX=1
+Environment=MOZ_DISABLE_CRASHREPORTER=1
+Environment=MOZ_CRASHREPORTER_DISABLE=1
 Restart=on-failure
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 FFVSVC
+
+# Move Firefox cache and profile to tmpfs
+mkdir -p /tmp/firefox-profile
+cat > /tmp/firefox-profile/user.js <<'FFJS'
+user_pref("browser.cache.disk.enable", false);
+user_pref("browser.cache.memory.enable", true);
+user_pref("browser.cache.memory.capacity", 524288);
+user_pref("browser.sessionstore.interval", 3600000);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.privatebrowsing.autostart", false);
+user_pref("toolkit.storage.synchronous", 0);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);
+user_pref("dom.ipc.processCount", 1);
+user_pref("browser.tabs.remote.autostart", false);
+FFJS
 
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
@@ -1455,8 +1507,7 @@ write_files:
   - path: /etc/docker/daemon.json
     content: |
       {
-"dns": ["172.18.0.1"],
-"dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
+"dns": ["8.8.8.8", "1.1.1.1"],
 "mtu": 1280,
         "log-driver": "json-file",
         "log-opts": {"max-size": "10m", "max-file": "3"},
