@@ -643,7 +643,7 @@ wait_for_ssh() {
             now=$(date +%s)
             age=$((now - last_mod))
 
-            if [[ $age -gt 30 ]]; then
+           if [[ $age -gt 90 ]]; then
                 echo ""
                 print_status "WARN" "Freeze detected (serial stale ${age}s)"
                 print_status "WARN" "Froze at: $(tail -1 "$serial_log" 2>/dev/null)"
@@ -1327,7 +1327,7 @@ REMOTE
                     stale=$((now - lm))
                 fi
 
-                if [[ $stale -gt 180 ]]; then
+                    if [[ $stale -gt 300 ]]; then
                     echo "[$(date '+%H:%M:%S')] FREEZE — SSH no banner, serial stale ${stale}s" >> "$watchdog_log"
                     echo "[$(date '+%H:%M:%S')] Froze at: $(tail -1 "$serial_log" 2>/dev/null)" >> "$watchdog_log"
 
