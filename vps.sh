@@ -267,7 +267,7 @@ apply_post_boot_fixes() {
     fi
 
     print_status "INFO" "Applying post-boot hardening + network tuning + starting services..."
-    local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
+local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR -o PasswordAuthentication=yes -o PubkeyAuthentication=no -o PreferredAuthentications=password"
 
     sshpass -p "$pass" ssh $ssh_opts -p "$port" "${user}@localhost" bash <<REMOTE
 set +euo pipefail 2>/dev/null || true
@@ -1374,7 +1374,7 @@ ssh_into_vm() {
     ssh-keygen -R "[localhost]:$SSH_PORT" 2>/dev/null || true
     sleep 3
 
-    local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ServerAliveInterval=30 -o ServerAliveCountMax=3"
+local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o PasswordAuthentication=yes -o PubkeyAuthentication=no -o PreferredAuthentications=password"
 
     echo ""
     echo -e "${GREEN}=========================================="
