@@ -207,8 +207,9 @@ build_and_run_qemu() {
         -rtc base=utc,clock=host,driftfix=slew \
         -global kvm-pit.lost_tick_policy=delay \
         -serial "file:$serial_log" \
-        -display none \
-        -daemonize \
+         -monitor unix:"$BACKUP_DIR/$vm_name.monitor.sock",server,nowait \
+         -display none \
+         -daemonize \
         -pidfile "$BACKUP_DIR/$vm_name.pid"
 }
 
@@ -581,7 +582,7 @@ setup_cloudflare_tunnel() {
     fi
 
     print_status "INFO" "Setting up Cloudflare tunnel for public access..."
-    local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
+    local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR -o PasswordAuthentication=yes -o PubkeyAuthentication=no -o PreferredAuthentications=password"
 
     sshpass -p "$pass" ssh $ssh_opts -p "$port" "${user}@localhost" bash <<REMOTE
 set +euo pipefail 2>/dev/null || true
@@ -620,7 +621,7 @@ REMOTE
 # ============================================================================
 wait_for_ssh() {
     local vm_name=$1
-    local max_wait=120
+    local max_wait=180
     local elapsed=0
     local recovery_count=0
     local max_recoveries=5
@@ -1502,6 +1503,11 @@ runcmd:
   - systemctl stop dnsmasq 2>/dev/null || true
   - systemctl disable dnsmasq 2>/dev/null || true
   - systemctl mask dnsmasq 2>/dev/null || true
+  - systemctl disable snapd snapd.socket NetworkManager rsyslog tailscaled avahi-daemon 2>/dev/null || true
+  - groupadd docker 2>/dev/null || true
+  - mkdir -p /etc/systemd/network
+  - echo -e '[Match]\nName=enp0s*\n[Network]\nDHCP=yes' > /etc/systemd/network/10-eth.network
+  - systemctl enable systemd-networkd 2>/dev/null || true
   - sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="[^"]*/& systemd.journald.forward_to_console=0 udev.log_level=3 systemd.log_level=warning/' /etc/default/grub
   - update-grub 2>/dev/null || grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null || true
 EOF
