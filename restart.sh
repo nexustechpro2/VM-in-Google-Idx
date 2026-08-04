@@ -191,6 +191,7 @@ cat > /etc/docker/daemon.json <<'DOCKEREOF'
   "ip-forward": true,
   "ip-masq": true,
   "storage-driver": "overlay2",
+  "default-platform": "linux/arm64",
   "default-ulimits": {
     "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
   }
