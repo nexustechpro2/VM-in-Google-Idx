@@ -621,7 +621,7 @@ REMOTE
 # ============================================================================
 wait_for_ssh() {
     local vm_name=$1
-    local max_wait=180
+    local max_wait=300
     local elapsed=0
     local recovery_count=0
     local max_recoveries=5
@@ -644,7 +644,7 @@ wait_for_ssh() {
             now=$(date +%s)
             age=$((now - last_mod))
 
-           if [[ $age -gt 90 ]]; then
+           if [[ $age -gt 180 ]]; then
                 echo ""
                 print_status "WARN" "Freeze detected (serial stale ${age}s)"
                 print_status "WARN" "Froze at: $(tail -1 "$serial_log" 2>/dev/null)"
@@ -1328,7 +1328,7 @@ REMOTE
                     stale=$((now - lm))
                 fi
 
-                    if [[ $stale -gt 300 ]]; then
+                   if [[ $stale -gt 400 ]]; then
                     echo "[$(date '+%H:%M:%S')] FREEZE — SSH no banner, serial stale ${stale}s" >> "$watchdog_log"
                     echo "[$(date '+%H:%M:%S')] Froze at: $(tail -1 "$serial_log" 2>/dev/null)" >> "$watchdog_log"
 
