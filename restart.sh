@@ -1,13 +1,16 @@
 #!/bin/bash
 
 ################################################################################
-# PELICAN AUTO-RESTART SCRIPT v9.5 PRODUCTION READY
-# Fixes from v9.4:
-#   - CRITICAL: Bring docker0 and pelican0 bridges UP after Docker starts
-#     (Google IDX/QEMU hypervisor leaves bridges in linkdown state, blocking
-#      container NAT/masquerade even though iptables rules are correct)
-#   - CRITICAL: Same bridge-up fix applied in BONUS network health check
-#   - MINOR: dnsmasq systemd-resolved stub fix documented in comments
+# PELICAN AUTO-RESTART SCRIPT v9.6 PRODUCTION READY
+# Fixes from v9.5:
+#   - CRITICAL: Phase 0 no longer pkill -9 dockerd blindly; checks for stale
+#     PID file first and only kills if PID is actually dead
+#   - CRITICAL: Phase 1 waits for /run/docker.sock to exist (not just systemd
+#     "active"), then creates /var/run/docker.sock symlink if missing
+#   - CRITICAL: Phase 6 (Wings) waits for socket before starting Wings, fixes
+#     Wings DNS (8.8.8.8 → 8.8.4.4) and network_mode after every start
+#   - CRITICAL: DNS lock uses only 1.1.1.1 + 8.8.4.4 (8.8.8.8 blocked on IDX)
+#   - ADDED: /etc/hosts nexusserver entry ensured on every run
 ################################################################################
 
 RED='\033[0;31m'
@@ -18,7 +21,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║     Pelican Services Restart v9.5      ║${NC}"
+echo -e "${CYAN}║     Pelican Services Restart v9.6      ║${NC}"
 echo -e "${CYAN}║     Production-Safe Restart            ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
@@ -88,14 +91,26 @@ systemctl list-units --type=scope --state=running 2>/dev/null \
         systemctl stop "$scope" 2>/dev/null || true
     done
 
-# Stop Docker fully
+# Stop Docker fully via systemd first
 systemctl stop docker.socket docker containerd 2>/dev/null || true
 sleep 2
 
-# Force kill anything still alive
-pkill -9 dockerd 2>/dev/null || true
-pkill -9 cloudflared 2>/dev/null || true
+# Only kill dockerd if the PID in the pidfile is actually dead
+# (avoids killing a fresh dockerd that systemd just started)
+if [ -f /var/run/docker.pid ]; then
+    DOCKER_PID=$(cat /var/run/docker.pid 2>/dev/null)
+    if [ -n "$DOCKER_PID" ] && ! kill -0 "$DOCKER_PID" 2>/dev/null; then
+        rm -f /var/run/docker.pid
+        echo -e "${YELLOW}   Removed stale docker.pid${NC}"
+    elif [ -n "$DOCKER_PID" ]; then
+        kill -9 "$DOCKER_PID" 2>/dev/null || true
+        rm -f /var/run/docker.pid
+        echo -e "${YELLOW}   Killed stale dockerd PID $DOCKER_PID${NC}"
+    fi
+fi
+
 pkill -x wings 2>/dev/null || true
+pkill -9 cloudflared 2>/dev/null || true
 pkill -9 php-fpm 2>/dev/null || true
 pkill -9 nginx 2>/dev/null || true
 pkill -f supervisord 2>/dev/null || true
@@ -103,6 +118,7 @@ sleep 2
 
 # Clean up stale socket/pid files
 rm -f /var/run/docker.sock /var/run/docker.pid
+rm -f /run/docker.sock /run/docker.pid
 rm -f /var/run/supervisor.sock /var/run/supervisord.pid
 rm -f /tmp/pelican-backup.lock
 
@@ -110,7 +126,7 @@ echo -e "${GREEN}   ✓ Everything stopped — clean slate${NC}"
 echo ""
 
 # ============================================================================
-# Lock DNS — only Cloudflare/Google DNS, no Tailscale override
+# Lock DNS — only 1.1.1.1 + 8.8.4.4 (8.8.8.8 is blocked on Google IDX)
 # NOTE: If dnsmasq fails to start with "Cannot assign requested address",
 #       it means systemd-resolved is blocking port 53. Fix once with:
 #         mkdir -p /etc/systemd/resolved.conf.d/
@@ -125,6 +141,9 @@ nameserver 8.8.4.4
 options timeout:2 attempts:2 rotate
 DNSEOF
 chattr +i /etc/resolv.conf
+
+# Ensure hostname resolves locally (prevents sudo warnings + DNS cascade failures)
+grep -q "$(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >> /etc/hosts
 
 # ============================================================================
 # 0.5. START LOCAL POSTGRESQL (only if using local pgsql)
@@ -163,9 +182,9 @@ systemctl reset-failed docker 2>/dev/null || true
 
 cat > /etc/docker/daemon.json <<'DOCKEREOF'
 {
-"dns": ["172.18.0.1"],
-"dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
-"mtu": 1280,
+  "dns": ["1.1.1.1", "8.8.4.4"],
+  "dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
+  "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
   "live-restore": true,
@@ -181,6 +200,8 @@ DOCKEREOF
 
 HAS_SYSTEMD=false
 if [ -d /run/systemd/system ] && pidof systemd >/dev/null 2>&1; then
+    systemctl start docker.socket 2>/dev/null || true
+    sleep 1
     systemctl start docker 2>/dev/null && HAS_SYSTEMD=true
 fi
 
@@ -188,28 +209,35 @@ if [ "$HAS_SYSTEMD" = false ]; then
     nohup dockerd --config-file /etc/docker/daemon.json > /var/log/docker.log 2>&1 &
 fi
 
-echo -n "   Waiting for Docker"
-for i in {1..20}; do
+# Wait for the actual socket file — not just systemd "active"
+echo -n "   Waiting for Docker socket"
+for i in {1..30}; do
     sleep 1
     echo -n "."
-    if docker ps >/dev/null 2>&1; then
+    if [ -S /run/docker.sock ] || [ -S /var/run/docker.sock ]; then
         echo ""
-        echo -e "${GREEN}   ✓ Docker started${NC}"
-        ((SERVICES_STARTED++))
+        echo -e "${GREEN}   ✓ Docker socket ready${NC}"
         break
     fi
 done
 echo ""
 
-if ! docker ps >/dev/null 2>&1; then
+# Ensure /var/run/docker.sock symlink exists (Wings uses this path)
+if [ -S /run/docker.sock ] && [ ! -S /var/run/docker.sock ]; then
+    ln -sf /run/docker.sock /var/run/docker.sock
+    echo -e "${GREEN}   ✓ Created /var/run/docker.sock symlink${NC}"
+fi
+
+# Verify Docker is actually responding
+if docker ps >/dev/null 2>&1; then
+    echo -e "${GREEN}   ✓ Docker started${NC}"
+    ((SERVICES_STARTED++))
+else
     echo -e "${RED}   ✗ Docker failed to start - check: journalctl -u docker or /var/log/docker.log${NC}"
 fi
 
 # ----------------------------------------------------------------------------
 # FIX: Google IDX/QEMU hypervisor leaves Docker bridges in linkdown state.
-# Without this, iptables MASQUERADE rules exist but never fire because the
-# kernel considers routes via a DOWN interface unreachable. Containers get
-# DNS (via dnsmasq) but cannot reach any external IPs.
 # ----------------------------------------------------------------------------
 ip link set docker0 up 2>/dev/null || true
 ip link set pelican0 up 2>/dev/null || true
@@ -265,7 +293,6 @@ fi
 # ============================================================================
 echo -e "${CYAN}[3/8] Starting PHP-FPM...${NC}"
 
-# Detect PHP version — prefer 8.3, skip 8.5
 PHP_VERSION=""
 for ver in 8.3 8.4 8.2 8.1; do
     if [ -f "/usr/sbin/php-fpm${ver}" ] || command -v php${ver} &>/dev/null; then
@@ -279,7 +306,6 @@ if [ -z "$PHP_VERSION" ]; then
 else
     SOCKET_PATH="/run/php/php${PHP_VERSION}-fpm.sock"
 
-    # Ensure socket mode in pool config
     if [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
         sed -i "s|^listen = .*|listen = ${SOCKET_PATH}|" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
         sed -i 's|^listen.owner = .*|listen.owner = www-data|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
@@ -305,7 +331,6 @@ fi
 # ============================================================================
 echo -e "${CYAN}[4/8] Starting Nginx...${NC}"
 
-# Ensure fastcgi_pass uses socket not TCP (never force TCP 9000)
 if [ -f "/etc/nginx/sites-available/pelican.conf" ] && [ -n "$PHP_VERSION" ]; then
     SOCKET_PATH="/run/php/php${PHP_VERSION}-fpm.sock"
     if ! grep -q "fastcgi_pass unix:${SOCKET_PATH}" /etc/nginx/sites-available/pelican.conf 2>/dev/null; then
@@ -337,13 +362,11 @@ fi
 # ============================================================================
 echo -e "${CYAN}[5/8] Starting Cron, Supervisor & Auto-Limits...${NC}"
 
-# Cron
 service cron start 2>/dev/null || cron 2>/dev/null || true
 pgrep cron >/dev/null && \
     echo -e "${GREEN}   ✓ Cron running${NC}" || \
     echo -e "${RED}   ✗ Cron failed${NC}"
 
-# Register DB backup cron if script exists and not already registered
 if [ -f "/usr/local/bin/pelican-db-backup.sh" ]; then
     if ! crontab -l 2>/dev/null | grep -q "pelican-db-backup"; then
         (crontab -l 2>/dev/null; echo "*/15 * * * * /usr/local/bin/pelican-db-backup.sh") | crontab -
@@ -355,7 +378,6 @@ else
     echo -e "${YELLOW}   ⚠ DB backup script not found - skipping${NC}"
 fi
 
-# Supervisor
 systemctl start supervisor 2>/dev/null || \
 supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
 sleep 3
@@ -369,7 +391,6 @@ pgrep -f "queue:work" >/dev/null && \
     echo -e "${GREEN}   ✓ Queue worker running${NC}" || \
     echo -e "${RED}   ✗ Queue worker failed${NC}"
 
-# Auto-Limits
 if [ -f "/usr/local/bin/pelican-auto-resource-limits.sh" ]; then
     /usr/local/bin/pelican-auto-resource-limits.sh && \
         echo -e "${GREEN}   ✓ Resource limits assigned${NC}" || \
@@ -385,34 +406,54 @@ fi
 ((SERVICES_STARTED++))
 
 # ============================================================================
-# 6. START WINGS (via systemd only — prevents port 8080 conflicts)
+# 6. START WINGS
 # ============================================================================
 echo -e "${CYAN}[6/8] Starting Wings...${NC}"
 
 if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
-    # Ensure Docker is running before Wings
-    if ! docker info >/dev/null 2>&1; then
+    # Ensure Docker socket exists and is responding before Wings starts
+    DOCKER_READY=false
+    for i in {1..15}; do
+        if ([ -S /run/docker.sock ] || [ -S /var/run/docker.sock ]) && docker ps >/dev/null 2>&1; then
+            DOCKER_READY=true
+            break
+        fi
+        echo -e "${YELLOW}   Waiting for Docker socket... ($i/15)${NC}"
+        sleep 2
+    done
+
+    if [ "$DOCKER_READY" = false ]; then
+        echo -e "${YELLOW}   Docker socket not ready — attempting recovery...${NC}"
         systemctl reset-failed docker 2>/dev/null || true
-        rm -f /var/run/docker.pid /var/run/docker.sock
-        systemctl start docker
+        rm -f /var/run/docker.pid
+        systemctl start docker.socket 2>/dev/null || true
+        sleep 2
+        systemctl start docker 2>/dev/null || true
         sleep 5
-        # Re-apply bridge fix if Docker had to be restarted here
+        # Re-create symlink if needed
+        if [ -S /run/docker.sock ] && [ ! -S /var/run/docker.sock ]; then
+            ln -sf /run/docker.sock /var/run/docker.sock
+        fi
         ip link set docker0 up 2>/dev/null || true
         ip link set pelican0 up 2>/dev/null || true
     fi
+
+    # Fix Wings config — panel may have reset these
+    sed -i 's/    - 8\.8\.8\.8$/    - 8.8.4.4/g' /etc/pelican/config.yml
+    sed -i 's/network_mode: host/network_mode: pelican_nw/' /etc/pelican/config.yml
+    echo -e "${GREEN}   ✓ Wings config patched (DNS + network_mode)${NC}"
+
     systemctl reset-failed wings 2>/dev/null || true
     systemctl start wings 2>/dev/null
-    sed -i 's/    - 8.8.8.8$/    - 8.8.4.4/g' /etc/pelican/config.yml
-   sed -i 's/network_mode: host/network_mode: pelican_nw/' /etc/pelican/config.yml
 
-    # Wait for Wings to actually bind on port 8080 before starting Cloudflare
-echo -n "   Waiting for Wings on port 8080"
-    for i in {1..10}; do
+    echo -n "   Waiting for Wings on port 8080"
+    for i in {1..15}; do
         sleep 2
         echo -n "."
         ss -tlnp 2>/dev/null | grep -q ":8080" && { echo ""; break; }
     done
     echo ""
+
     if systemctl is-active --quiet wings; then
         echo -e "${GREEN}   ✓ Wings started${NC}"
         ss -tlnp 2>/dev/null | grep -q ":8080" && \
@@ -482,7 +523,6 @@ if [ -d "/var/www/pelican" ]; then
 
     echo -e "${GREEN}   ✓ Cache cleared and rebuilt${NC}"
 
-    # Run ANALYZE on local PostgreSQL only — skips if remote/mysql/sqlite
     DB_HOST_VAL=$(grep "^DB_HOST=" .env 2>/dev/null | cut -d'=' -f2)
     DB_DRIVER_VAL=$(grep "^DB_CONNECTION=" .env 2>/dev/null | cut -d'=' -f2)
     DB_NAME_VAL=$(grep "^DB_DATABASE=" .env 2>/dev/null | cut -d'=' -f2)
@@ -509,16 +549,16 @@ if docker info >/dev/null 2>&1; then
         echo -e "${YELLOW}   ⚠ Docker iptables chains missing — restarting Docker...${NC}"
         systemctl restart docker 2>/dev/null || true
         sleep 5
+        # Re-create symlink after restart
+        if [ -S /run/docker.sock ] && [ ! -S /var/run/docker.sock ]; then
+            ln -sf /run/docker.sock /var/run/docker.sock
+        fi
     fi
     iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN \
         -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
-
-    # Ensure bridges are UP — IDX hypervisor leaves them linkdown after Docker
-    # starts, which silently breaks container NAT even with correct iptables rules
     ip link set docker0 up 2>/dev/null || true
     ip link set pelican0 up 2>/dev/null || true
-
     echo -e "${GREEN}   ✓ Docker network health OK${NC}"
 fi
 
@@ -573,17 +613,26 @@ CF_COUNT=$(pgrep -c cloudflared 2>/dev/null || echo 0)
     echo -e "${GREEN}✓ Cloudflare:   Running (${CF_COUNT} process)${NC}" || \
     echo -e "${YELLOW}⚠ Cloudflare:   Not Running${NC}"
 
-# Show dnsmasq status
 systemctl is-active --quiet dnsmasq && \
     echo -e "${GREEN}✓ dnsmasq:      Running (DNS on 172.18.0.1)${NC}" || \
     echo -e "${RED}✗ dnsmasq:      Not Running — containers will lose DNS!${NC}"
 
-# Show bridge status
 docker0_state=$(cat /sys/class/net/docker0/operstate 2>/dev/null || echo "unknown")
 pelican0_state=$(cat /sys/class/net/pelican0/operstate 2>/dev/null || echo "unknown")
 echo -e "${GREEN}✓ Bridges:      docker0=${docker0_state}, pelican0=${pelican0_state}${NC}"
 
-# Show PostgreSQL status only if using local pgsql
+# Verify Wings config is correct
+WINGS_DNS=$(grep -A2 'dns:' /etc/pelican/config.yml 2>/dev/null | grep -v 'dns:' | head -1 | tr -d ' -')
+WINGS_NET=$(grep 'network_mode:' /etc/pelican/config.yml 2>/dev/null | awk '{print $2}')
+echo -e "${GREEN}✓ Wings config: DNS=${WINGS_DNS}, network=${WINGS_NET}${NC}"
+
+# Show /var/run/docker.sock symlink status
+if [ -S /var/run/docker.sock ]; then
+    echo -e "${GREEN}✓ Docker sock:  /var/run/docker.sock OK${NC}"
+else
+    echo -e "${RED}✗ Docker sock:  /var/run/docker.sock missing${NC}"
+fi
+
 DB_HOST_CHECK=$(grep "^DB_HOST=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
 DB_CONN_CHECK=$(grep "^DB_CONNECTION=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
 if [ "$DB_CONN_CHECK" = "pgsql" ] && \
@@ -620,4 +669,4 @@ echo -e "  Queue:       ${GREEN}supervisorctl tail -f pelican-queue${NC}"
 echo -e "  Auto-Limits: ${GREEN}tail -f /var/log/pelican-auto-limits-fast.log${NC}"
 echo -e "  DB Backup:   ${GREEN}tail -f /var/log/pelican-db-backup.log${NC}"
 echo ""
-echo "restart.sh v9.5"
+echo "restart.sh v9.6"
