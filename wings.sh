@@ -188,8 +188,7 @@ mkdir -p /etc/docker
 if [ "$IS_CONTAINER" = true ]; then
     cat > /etc/docker/daemon.json <<'DEOF'
 {
-"dns": ["172.18.0.1"],
-"dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
+"dns": ["1.1.1.1", "8.8.4.4"],
 "mtu": 1280,
   "iptables": true,
   "ip-masq": true,
@@ -209,8 +208,7 @@ DEOF
 else
     cat > /etc/docker/daemon.json <<'DEOF'
 {
-"dns": ["172.18.0.1"],
-"dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
+"dns": ["1.1.1.1", "8.8.4.4"],
 "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
@@ -475,7 +473,7 @@ sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml
 sed -i 's/host: 127.0.0.1/host: 0.0.0.0/' /etc/pelican/config.yml
 sed -i 's/IPv6: true/IPv6: false/' /etc/pelican/config.yml
 sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml
-sed -i '/dns:/,/- 1.0.0.1/ c\    dns:\n    - 172.18.0.1' /etc/pelican/config.yml
+sed -i '/dns:/,/- 1.0.0.1/ c\    dns:\n    - 1.1.1.1\n    - 8.8.4.4' /etc/pelican/config.yml
 sed -i 's/network_mtu: 1500/network_mtu: 1280/' /etc/pelican/config.yml
 sed -i '/^      v6:/,/^        gateway:/ s/^/#/' /etc/pelican/config.yml
 if [ "$USE_HOST_NETWORK" = true ]; then
