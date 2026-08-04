@@ -403,6 +403,7 @@ if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
     systemctl reset-failed wings 2>/dev/null || true
     systemctl start wings 2>/dev/null
     sed -i 's/    - 8.8.8.8$/    - 8.8.4.4/g' /etc/pelican/config.yml
+   sed -i 's/network_mode: host/network_mode: pelican_nw/' /etc/pelican/config.yml
 
     # Wait for Wings to actually bind on port 8080 before starting Cloudflare
 echo -n "   Waiting for Wings on port 8080"
