@@ -200,6 +200,8 @@ DOCKEREOF
 
 HAS_SYSTEMD=false
 if [ -d /run/systemd/system ] && pidof systemd >/dev/null 2>&1; then
+    systemctl stop docker docker.socket 2>/dev/null || true
+    sleep 2
     systemctl start docker.socket 2>/dev/null || true
     sleep 1
     systemctl start docker 2>/dev/null && HAS_SYSTEMD=true
@@ -223,7 +225,7 @@ done
 echo ""
 
 # Ensure /var/run/docker.sock symlink exists (Wings uses this path)
-if [ -S /run/docker.sock ] && [ ! -S /var/run/docker.sock ]; then
+if [ -S /run/docker.sock ]; then
     ln -sf /run/docker.sock /var/run/docker.sock
     echo -e "${GREEN}   ✓ Created /var/run/docker.sock symlink${NC}"
 fi
@@ -431,8 +433,8 @@ if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
         systemctl start docker 2>/dev/null || true
         sleep 5
         # Re-create symlink if needed
-        if [ -S /run/docker.sock ] && [ ! -S /var/run/docker.sock ]; then
-            ln -sf /run/docker.sock /var/run/docker.sock
+        if [ -S /run/docker.sock ]; then
+    ln -sf /run/docker.sock /var/run/docker.sock
         fi
         ip link set docker0 up 2>/dev/null || true
         ip link set pelican0 up 2>/dev/null || true
@@ -550,8 +552,8 @@ if docker info >/dev/null 2>&1; then
         systemctl restart docker 2>/dev/null || true
         sleep 5
         # Re-create symlink after restart
-        if [ -S /run/docker.sock ] && [ ! -S /var/run/docker.sock ]; then
-            ln -sf /run/docker.sock /var/run/docker.sock
+        if [ -S /run/docker.sock ]; then
+    ln -sf /run/docker.sock /var/run/docker.sock
         fi
     fi
     iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN \
