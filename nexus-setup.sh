@@ -151,16 +151,6 @@ if [ -n "$TAILSCALE_IP" ]; then
     print_success "Tailscale IP: $TAILSCALE_IP"
 fi
 
-# NOW lock DNS — no Tailscale DNS override, only Cloudflare/Google
-chattr -i /etc/resolv.conf 2>/dev/null || true
-cat > /etc/resolv.conf <<'DNSEOF'
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-nameserver 8.8.4.4
-options timeout:2 attempts:2 rotate
-DNSEOF
-chattr +i /etc/resolv.conf
-
 # ============================================================
 # STEP 7 — INSTALL SSHX (ONE INSTANCE ONLY)
 # ============================================================
@@ -283,14 +273,31 @@ Type=simple
 User=root
 Environment=DISPLAY=:1
 Environment=HOME=/root
+Environment=MOZ_DISABLE_CRASHREPORTER=1
+Environment=MOZ_CRASHREPORTER_DISABLE=1
 ExecStartPre=/bin/sleep 5
-ExecStart=/usr/bin/firefox --display=:1
+ExecStartPre=/bin/bash -c 'mkdir -p /tmp/firefox-profile /tmp/firefox-cache'
+ExecStart=/usr/bin/firefox --display=:1 --no-remote --profile /tmp/firefox-profile
 Restart=on-failure
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 FFVSVC
+
+mkdir -p /tmp/firefox-profile
+cat > /tmp/firefox-profile/user.js << 'FFJS'
+user_pref("browser.cache.disk.enable", false);
+user_pref("browser.cache.memory.enable", true);
+user_pref("browser.cache.memory.capacity", 524288);
+user_pref("browser.sessionstore.interval", 3600000);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("toolkit.storage.synchronous", 0);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("dom.ipc.processCount", 1);
+user_pref("browser.tabs.remote.autostart", false);
+FFJS
 
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
