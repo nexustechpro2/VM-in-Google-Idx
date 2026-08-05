@@ -226,11 +226,15 @@ fi
 
 # Fix DNS — remove Tailscale search domain interference
 tailscale set --accept-dns=false 2>/dev/null || true
+rm -f /etc/resolv.conf
 cat > /etc/resolv.conf <<'DNSEOF'
 nameserver 1.1.1.1
 nameserver 8.8.4.4
 DNSEOF
-chattr +i /etc/resolv.conf
+chattr +i /etc/resolv.conf 2>/dev/null || {
+    systemctl disable --now systemd-resolved 2>/dev/null || true
+    systemctl disable --now resolvconf 2>/dev/null || true
+}
 echo -e "${GREEN}   ✓ DNS locked to 1.1.1.1 + 8.8.4.4 (Tailscale DNS disabled)${NC}"
 
 # TCP MSS clamping — fixes slow/broken downloads when ICMP is blocked
