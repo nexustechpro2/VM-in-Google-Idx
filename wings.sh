@@ -145,7 +145,7 @@ fi
 # ============================================================================
 echo -e "${CYAN}[4/20] Updating system...${NC}"
 apt-get update -qq 2>&1 | grep -v "^Get:" || true
-apt-get install -y curl wget sudo ca-certificates gnupg openssl iptables git net-tools 2>/dev/null || true
+apt-get install -y curl wget sudo ca-certificates gnupg openssl iptables git net-tools dnsutils 2>/dev/null || true
 echo -e "${GREEN}   ✓ System updated${NC}"
 
 # ============================================================================
@@ -224,18 +224,40 @@ else
 DEOF
 fi
 
-# Fix DNS — remove Tailscale search domain interference
+# Fix DNS — handle all cases (symlink, real file, tmpfs, systemd-resolved)
 tailscale set --accept-dns=false 2>/dev/null || true
-rm -f /etc/resolv.conf
-cat > /etc/resolv.conf <<'DNSEOF'
+
+# If systemd-resolved is already configured correctly, just ensure no-stub
+if systemctl is-active --quiet systemd-resolved; then
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/no-stub.conf <<'RESOLVCONF'
+[Resolve]
+DNS=1.1.1.1 8.8.4.4
+DNSStubListener=no
+Domains=~.
+RESOLVCONF
+    systemctl restart systemd-resolved
+    # resolv.conf will be a symlink managed by systemd — leave it alone
+    echo -e "${GREEN}   ✓ DNS configured via systemd-resolved (1.1.1.1 + 8.8.4.4)${NC}"
+else
+    # No systemd-resolved — write resolv.conf directly
+    # Break symlink if present, then write real file
+    rm -f /etc/resolv.conf
+    cat > /etc/resolv.conf <<'DNSEOF'
 nameserver 1.1.1.1
 nameserver 8.8.4.4
 DNSEOF
-chattr +i /etc/resolv.conf 2>/dev/null || {
-    systemctl disable --now systemd-resolved 2>/dev/null || true
-    systemctl disable --now resolvconf 2>/dev/null || true
-}
-echo -e "${GREEN}   ✓ DNS locked to 1.1.1.1 + 8.8.4.4 (Tailscale DNS disabled)${NC}"
+    # Try to lock it — fails silently on tmpfs/overlayfs (containers)
+    chattr +i /etc/resolv.conf 2>/dev/null && \
+        echo -e "${GREEN}   ✓ DNS locked to 1.1.1.1 + 8.8.4.4 (immutable)${NC}" || \
+        echo -e "${GREEN}   ✓ DNS set to 1.1.1.1 + 8.8.4.4 (filesystem lock not supported — OK)${NC}"
+fi
+
+# Verify DNS is actually working
+DNS_VERIFY=$(nslookup google.com 2>&1 | grep -q "Address:" && echo "OK" || echo "FAIL")
+[ "$DNS_VERIFY" = "OK" ] && \
+    echo -e "${GREEN}   ✓ DNS resolution verified${NC}" || \
+    echo -e "${YELLOW}   ⚠ DNS verify failed — containers may still work${NC}"
 
 # TCP MSS clamping — fixes slow/broken downloads when ICMP is blocked
 iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
