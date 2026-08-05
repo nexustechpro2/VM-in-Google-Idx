@@ -24,7 +24,7 @@ WHITE='\033[0;97m'
 NC='\033[0m'
 
 # --- DIRECTORIES ---
-BACKUP_DIR="/var/vms"
+BACKUP_DIR="${BACKUP_DIR:-/home/user/vms}"
 SNAPSHOT_DIR="/nexusvms"
 
 # ============================================================================
@@ -1550,7 +1550,8 @@ write_files:
       net.ipv4.tcp_tw_reuse=1
       net.ipv4.tcp_fin_timeout=15
 runcmd:
-  - rm -f /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
+  - echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
+  - echo "PermitRootLogin yes" >> /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
   - echo "127.0.1.1 $HOSTNAME" >> /etc/hosts
   - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
@@ -1575,6 +1576,7 @@ runcmd:
   - mkdir -p /etc/systemd/network
   - echo -e '[Match]\nName=enp0s*\n[Network]\nDHCP=yes' > /etc/systemd/network/10-eth.network
   - systemctl enable systemd-networkd 2>/dev/null || true
+  - touch /etc/cloud/cloud-init.disabled
   - sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="[^"]*/& systemd.journald.forward_to_console=0 udev.log_level=3 systemd.log_level=warning/' /etc/default/grub
   - update-grub 2>/dev/null || grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null || true
 EOF
