@@ -143,7 +143,7 @@ options timeout:2 attempts:2 rotate
 DNSEOF
 
 # Ensure hostname resolves locally (prevents sudo warnings + DNS cascade failures)
-grep -q "$(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >> /etc/hosts
+grep -q "$(hostname)" /etc/hosts || echo "127.0.1.1 $(hostname)" >> /etc/hosts
 
 # ============================================================================
 # 0.5. START LOCAL POSTGRESQL (only if using local pgsql)
