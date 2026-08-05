@@ -224,6 +224,15 @@ else
 DEOF
 fi
 
+# Fix DNS — remove Tailscale search domain interference
+tailscale set --accept-dns=false 2>/dev/null || true
+cat > /etc/resolv.conf <<'DNSEOF'
+nameserver 1.1.1.1
+nameserver 8.8.4.4
+DNSEOF
+chattr +i /etc/resolv.conf
+echo -e "${GREEN}   ✓ DNS locked to 1.1.1.1 + 8.8.4.4 (Tailscale DNS disabled)${NC}"
+
 # TCP MSS clamping — fixes slow/broken downloads when ICMP is blocked
 iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
