@@ -134,6 +134,7 @@ echo ""
 #           > /etc/systemd/resolved.conf.d/no-stub.conf
 #         systemctl restart systemd-resolved
 # ============================================================================
+tailscale set --accept-dns=false 2>/dev/null || true
 chattr -i /etc/resolv.conf 2>/dev/null || true
 cat > /etc/resolv.conf <<'DNSEOF'
 nameserver 1.1.1.1
