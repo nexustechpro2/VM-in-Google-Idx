@@ -188,7 +188,7 @@ mkdir -p /etc/docker
 if [ "$IS_CONTAINER" = true ]; then
     cat > /etc/docker/daemon.json <<'DEOF'
 {
-"dns": ["1.1.1.1", "8.8.4.4"],
+"dns": ["8.8.4.4", "1.0.0.1"],
 "mtu": 1280,
   "iptables": true,
   "ip-masq": true,
@@ -208,7 +208,7 @@ DEOF
 else
     cat > /etc/docker/daemon.json <<'DEOF'
 {
-"dns": ["1.1.1.1", "8.8.4.4"],
+"dns": ["8.8.4.4", "1.0.0.1"],
 "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
@@ -232,7 +232,7 @@ if systemctl is-active --quiet systemd-resolved; then
     mkdir -p /etc/systemd/resolved.conf.d
     cat > /etc/systemd/resolved.conf.d/no-stub.conf <<'RESOLVCONF'
 [Resolve]
-DNS=1.1.1.1 8.8.4.4
+DNS=8.8.4.4 1.0.0.1
 DNSStubListener=no
 Domains=~.
 RESOLVCONF
@@ -244,8 +244,8 @@ else
     # Break symlink if present, then write real file
     rm -f /etc/resolv.conf
     cat > /etc/resolv.conf <<'DNSEOF'
-nameserver 1.1.1.1
 nameserver 8.8.4.4
+nameserver 1.0.0.1
 DNSEOF
     # Try to lock it — fails silently on tmpfs/overlayfs (containers)
     chattr +i /etc/resolv.conf 2>/dev/null && \
@@ -264,8 +264,8 @@ cat > /etc/dnsmasq.conf <<'DNSMASQEOF'
 listen-address=172.18.0.1
 bind-interfaces
 no-resolv
-server=1.1.1.1
 server=8.8.4.4
+server=1.0.0.1
 cache-size=1000
 DNSMASQEOF
 systemctl enable dnsmasq 2>/dev/null || true
@@ -523,7 +523,7 @@ sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml
 sed -i 's/host: 127.0.0.1/host: 0.0.0.0/' /etc/pelican/config.yml
 sed -i 's/IPv6: true/IPv6: false/' /etc/pelican/config.yml
 sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml
-sed -i '/dns:/,/- 1.0.0.1/ c\    dns:\n    - 1.1.1.1\n    - 8.8.4.4' /etc/pelican/config.yml
+sed -i '/dns:/,/- 1.0.0.1/ c\    dns:\n    - 8.8.4.4\n    - 1.0.0.1' /etc/pelican/config.yml
 sed -i 's/network_mtu: 1500/network_mtu: 1280/' /etc/pelican/config.yml
 sed -i '/^      v6:/,/^        gateway:/ s/^/#/' /etc/pelican/config.yml
 if [ "$USE_HOST_NETWORK" = true ]; then
