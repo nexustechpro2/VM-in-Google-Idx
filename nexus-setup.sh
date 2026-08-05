@@ -153,13 +153,27 @@ fi
 
 # Disable Tailscale DNS to prevent search domain interference with Docker
 tailscale set --accept-dns=false 2>/dev/null || true
-chattr -i /etc/resolv.conf 2>/dev/null || true
-cat > /etc/resolv.conf <<'EOF'
+if systemctl is-active --quiet systemd-resolved; then
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/no-stub.conf <<'RESOLVCONF'
+[Resolve]
+DNS=1.1.1.1 8.8.4.4
+DNSStubListener=no
+Domains=~.
+RESOLVCONF
+    systemctl restart systemd-resolved
+    print_success "DNS configured via systemd-resolved (1.1.1.1 + 8.8.4.4)"
+else
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    rm -f /etc/resolv.conf
+    cat > /etc/resolv.conf <<'EOF'
 nameserver 1.1.1.1
 nameserver 8.8.4.4
 EOF
-chattr +i /etc/resolv.conf
-print_success "DNS locked to 1.1.1.1 + 8.8.4.4 (Tailscale DNS disabled)"
+    chattr +i /etc/resolv.conf 2>/dev/null && \
+        print_success "DNS locked to 1.1.1.1 + 8.8.4.4 (immutable)" || \
+        print_success "DNS set to 1.1.1.1 + 8.8.4.4 (filesystem lock not supported — OK)"
+fi
 
 # ============================================================
 # STEP 7 — INSTALL SSHX (ONE INSTANCE ONLY)
