@@ -194,6 +194,14 @@ fi
 # ============================================================================
 echo -e "${CYAN}[1/8] Starting Docker...${NC}"
 
+# Install dnsmasq if missing — do this first, before Docker touches networking
+if ! command -v dnsmasq &>/dev/null; then
+    echo -e "${YELLOW}   dnsmasq not installed — installing...${NC}"
+    apt-get install -y dnsmasq >/dev/null 2>&1 && \
+        echo -e "${GREEN}   ✓ dnsmasq installed${NC}" || \
+        echo -e "${RED}   ✗ dnsmasq install failed${NC}"
+fi
+
 systemctl reset-failed docker 2>/dev/null || true
 
 cat > /etc/docker/daemon.json <<'DOCKEREOF'
@@ -268,10 +276,31 @@ ip link set docker0 up 2>/dev/null || true
 ip link set pelican0 up 2>/dev/null || true
 echo -e "${GREEN}   ✓ Docker bridges brought up (docker0, pelican0)${NC}"
 
-# Unmask and start dnsmasq safely
-systemctl unmask dnsmasq 2>/dev/null || true
+# Install dnsmasq if missing
+if ! command -v dnsmasq &>/dev/null; then
+    echo -e "${YELLOW}   dnsmasq not installed — installing...${NC}"
+    apt-get install -y dnsmasq >/dev/null 2>&1
+    echo -e "${GREEN}   ✓ dnsmasq installed${NC}"
+fi
 
-# Wait for 172.18.0.1 to be assigned to pelican0 before starting dnsmasq
+# Unmask and configure dnsmasq
+systemctl unmask dnsmasq 2>/dev/null || true
+cat > /etc/dnsmasq.conf <<'DNSMASQEOF'
+listen-address=172.18.0.1
+bind-interfaces
+no-resolv
+server=1.1.1.1
+server=8.8.4.4
+cache-size=1000
+DNSMASQEOF
+
+# Ensure systemd-resolved isn't blocking port 53
+mkdir -p /etc/systemd/resolved.conf.d/
+echo -e "[Resolve]\nDNSStubListener=no" > /etc/systemd/resolved.conf.d/no-stub.conf
+systemctl restart systemd-resolved 2>/dev/null || true
+sleep 1
+
+# Wait for pelican0 IP before starting dnsmasq
 echo -n "   Waiting for pelican0 IP"
 for i in {1..15}; do
     ip addr show pelican0 2>/dev/null | grep -q "172.18.0.1" && break
@@ -280,14 +309,11 @@ for i in {1..15}; do
 done
 echo ""
 
-# Ensure systemd-resolved isn't blocking port 53
-mkdir -p /etc/systemd/resolved.conf.d/
-echo -e "[Resolve]\nDNSStubListener=no" > /etc/systemd/resolved.conf.d/no-stub.conf
-systemctl restart systemd-resolved 2>/dev/null || true
-sleep 1
-
-systemctl restart dnsmasq 2>/dev/null || true
 systemctl enable dnsmasq 2>/dev/null || true
+systemctl restart dnsmasq 2>/dev/null || true
+systemctl is-active --quiet dnsmasq && \
+    echo -e "${GREEN}   ✓ dnsmasq running (DNS on 172.18.0.1)${NC}" || \
+    echo -e "${YELLOW}   ⚠ dnsmasq not ready — will recover once pelican0 is up${NC}"
 
 # ============================================================================
 # 2. START REDIS
