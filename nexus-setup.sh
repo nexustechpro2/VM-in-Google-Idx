@@ -151,6 +151,16 @@ if [ -n "$TAILSCALE_IP" ]; then
     print_success "Tailscale IP: $TAILSCALE_IP"
 fi
 
+# Disable Tailscale DNS to prevent search domain interference with Docker
+tailscale set --accept-dns=false 2>/dev/null || true
+chattr -i /etc/resolv.conf 2>/dev/null || true
+cat > /etc/resolv.conf <<'EOF'
+nameserver 1.1.1.1
+nameserver 8.8.4.4
+EOF
+chattr +i /etc/resolv.conf
+print_success "DNS locked to 1.1.1.1 + 8.8.4.4 (Tailscale DNS disabled)"
+
 # ============================================================
 # STEP 7 — INSTALL SSHX (ONE INSTANCE ONLY)
 # ============================================================
