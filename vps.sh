@@ -1503,6 +1503,11 @@ write_files:
       PasswordAuthentication yes
       PermitRootLogin yes
     permissions: '0644'
+  - path: /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
+    content: |
+      PasswordAuthentication yes
+      PermitRootLogin yes
+    permissions: '0644'
   - path: /etc/sudoers.d/$USERNAME
     content: |
       $USERNAME ALL=(ALL) NOPASSWD:ALL
