@@ -145,7 +145,7 @@ fi
 # ============================================================================
 echo -e "${CYAN}[4/20] Updating system...${NC}"
 apt-get update -qq 2>&1 | grep -v "^Get:" || true
-apt-get install -y curl wget sudo ca-certificates gnupg openssl iptables git net-tools dnsutils 2>/dev/null || true
+apt-get install -y curl wget sudo ca-certificates gnupg openssl iptables git net-tools dnsutils dnsmasq 2>/dev/null || true
 echo -e "${GREEN}   ✓ System updated${NC}"
 
 # ============================================================================
@@ -258,6 +258,21 @@ DNS_VERIFY=$(nslookup google.com 2>&1 | grep -q "Address:" && echo "OK" || echo 
 [ "$DNS_VERIFY" = "OK" ] && \
     echo -e "${GREEN}   ✓ DNS resolution verified${NC}" || \
     echo -e "${YELLOW}   ⚠ DNS verify failed — containers may still work${NC}"
+
+# Configure and start dnsmasq
+cat > /etc/dnsmasq.conf <<'DNSMASQEOF'
+listen-address=172.18.0.1
+bind-interfaces
+no-resolv
+server=1.1.1.1
+server=8.8.4.4
+cache-size=1000
+DNSMASQEOF
+systemctl enable dnsmasq 2>/dev/null || true
+systemctl restart dnsmasq 2>/dev/null || true
+systemctl is-active --quiet dnsmasq && \
+    echo -e "${GREEN}   ✓ dnsmasq running (DNS on 172.18.0.1)${NC}" || \
+    echo -e "${YELLOW}   ⚠ dnsmasq not running yet — will start after Wings creates pelican0${NC}"
 
 # TCP MSS clamping — fixes slow/broken downloads when ICMP is blocked
 iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
