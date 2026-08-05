@@ -947,49 +947,76 @@ echo -e "${GREEN}   ✓ Cloudflare Tunnel installed${NC}"
 # CLEAR CACHES (no config:cache - breaks plugins)
 # ============================================================================
 echo -e "${CYAN}[18/20] Clearing all caches...${NC}"
-
 cd /var/www/pelican
-
 $PHP_BIN artisan config:clear >/dev/null 2>&1 || true
 $PHP_BIN artisan cache:clear >/dev/null 2>&1 || true
 $PHP_BIN artisan view:clear >/dev/null 2>&1 || true
 $PHP_BIN artisan route:clear >/dev/null 2>&1 || true
-$PHP_BIN artisan route:cache >/dev/null 2>&1 || true
-
+$PHP_BIN artisan event:clear >/dev/null 2>&1 || true
+$PHP_BIN artisan optimize:clear >/dev/null 2>&1 || true
+$PHP_BIN artisan queue:restart >/dev/null 2>&1 || true
 rm -rf storage/framework/views/* 2>/dev/null || true
 rm -rf storage/framework/cache/* 2>/dev/null || true
+rm -rf storage/framework/sessions/* 2>/dev/null || true
+rm -rf bootstrap/cache/* 2>/dev/null || true
+redis-cli FLUSHALL >/dev/null 2>&1 || true
+$PHP_BIN artisan view:cache >/dev/null 2>&1 || true
+$PHP_BIN artisan event:cache >/dev/null 2>&1 || true
+# NOTE: config:cache and route:cache intentionally skipped — breaks dynamic plugins
+echo -e "${GREEN}   ✓ All caches cleared and rebuilt${NC}"
 
-# NOTE: config:cache intentionally skipped — breaks dynamic plugins
+# ============================================================================
+# FIX DNS
+# ============================================================================
+echo -e "${CYAN}   Configuring DNS...${NC}"
+tailscale set --accept-dns=false 2>/dev/null || true
 
-# Fix DNS — lock resolv.conf
-systemctl disable systemd-resolved 2>/dev/null || true
-systemctl stop systemd-resolved 2>/dev/null || true
-chattr -i /etc/resolv.conf 2>/dev/null || true
-rm -f /etc/resolv.conf
-cat > /etc/resolv.conf <<'DNSEOF'
-nameserver 1.1.1.1
-nameserver 8.8.8.8
+if systemctl is-active --quiet systemd-resolved; then
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/no-stub.conf <<'RESOLVCONF'
+[Resolve]
+DNS=8.8.4.4 1.0.0.1
+DNSStubListener=no
+Domains=~.
+RESOLVCONF
+    systemctl restart systemd-resolved
+    echo -e "${GREEN}   ✓ DNS configured via systemd-resolved (8.8.4.4 + 1.0.0.1)${NC}"
+else
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    rm -f /etc/resolv.conf
+    cat > /etc/resolv.conf <<'DNSEOF'
 nameserver 8.8.4.4
+nameserver 1.0.0.1
 options timeout:2 attempts:2 rotate
 DNSEOF
-chattr +i /etc/resolv.conf
+    chattr +i /etc/resolv.conf 2>/dev/null && \
+        echo -e "${GREEN}   ✓ DNS locked to 8.8.4.4 + 1.0.0.1 (immutable)${NC}" || \
+        echo -e "${GREEN}   ✓ DNS set to 8.8.4.4 + 1.0.0.1 (filesystem lock not supported — OK)${NC}"
+fi
 
 # Install dnsmasq for container DNS
 apt install dnsmasq -y 2>/dev/null || true
+systemctl unmask dnsmasq 2>/dev/null || true
 cat > /etc/dnsmasq.conf <<'DNSMASQEOF'
-listen-address=127.0.0.1,172.18.0.1
+listen-address=172.18.0.1
 bind-interfaces
-server=1.1.1.1
-server=8.8.8.8
 no-resolv
+server=8.8.4.4
+server=1.0.0.1
 cache-size=1000
 domain-needed
 bogus-priv
 DNSMASQEOF
 systemctl enable dnsmasq 2>/dev/null || true
 systemctl restart dnsmasq 2>/dev/null || true
+systemctl is-active --quiet dnsmasq && \
+    echo -e "${GREEN}   ✓ dnsmasq running (DNS on 172.18.0.1)${NC}" || \
+    echo -e "${YELLOW}   ⚠ dnsmasq not ready — will recover once pelican0 is up${NC}"
 
-# Enable OPcache
+# ============================================================================
+# ENABLE OPCACHE
+# ============================================================================
+echo -e "${CYAN}   Enabling OPcache...${NC}"
 apt install -y php${PHP_VERSION}-opcache 2>/dev/null || true
 cat > /etc/php/${PHP_VERSION}/mods-available/opcache.ini <<OPCEOF
 zend_extension=opcache
@@ -1007,9 +1034,8 @@ OPCEOF
 phpenmod -v ${PHP_VERSION} opcache 2>/dev/null || true
 systemctl restart php${PHP_VERSION}-fpm 2>/dev/null || true
 systemctl restart nginx 2>/dev/null || true
-
 sleep 2
-echo -e "${GREEN}   ✓ All caches cleared${NC}"
+echo -e "${GREEN}   ✓ All cache cleared${NC}"
 
 # ============================================================================
 # INSTALL EGG ICONS
