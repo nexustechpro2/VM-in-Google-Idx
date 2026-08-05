@@ -200,7 +200,7 @@ build_and_run_qemu() {
         -drive "file=$seed_file,format=raw,if=virtio,cache=writeback" \
         -boot order=c \
         -device "virtio-net-pci,netdev=n0,rx_queue_size=256,tx_queue_size=256,romfile=,host_mtu=1280" \
-        -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22,dns=1.1.1.1${netdev_extra}" \
+        -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22,dns=8.8.4.4${netdev_extra}" \
         -object rng-random,filename=/dev/urandom,id=rng0 \
         -device virtio-rng-pci,rng=rng0 \
         -device virtio-balloon-pci \
@@ -288,7 +288,7 @@ if command -v docker &>/dev/null; then
     sudo mkdir -p /etc/docker
     sudo tee /etc/docker/daemon.json > /dev/null <<'DF'
 {
-"dns": ["1.1.1.1", "8.8.4.4"],
+"dns": ["8.8.4.4", "1.0.0.1"],
 "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
@@ -473,13 +473,13 @@ fi
 mkdir -p /etc/systemd/resolved.conf.d
 tee /etc/systemd/resolved.conf.d/nexus.conf > /dev/null <<'RESOLV'
 [Resolve]
-DNS=8.8.8.8 1.1.1.1
+DNS=8.8.4.4 1.0.0.1
 FallbackDNS=8.8.4.4
 DNSStubListener=no
 RESOLV
 systemctl restart systemd-resolved 2>/dev/null || true
-echo "nameserver 8.8.8.8" > /etc/resolv.conf
-echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+echo "nameserver 8.8.4.4" > /etc/resolv.conf
+echo "nameserver 1.0.0.1" >> /etc/resolv.conf
 
 # ---- VNC setup ----
 mkdir -p /root/.vnc
@@ -1004,7 +1004,7 @@ start_freeze_watchdog() {
             qcmd+=" -drive file=$_BACKUP_DIR/$vm-seed.iso,format=raw,if=virtio,cache=writeback"
             qcmd+=" -boot order=c"
             qcmd+=" -device virtio-net-pci,netdev=n0,rx_queue_size=256,tx_queue_size=256,romfile=,host_mtu=1280"
-            qcmd+=" -netdev user,id=n0,hostfwd=tcp::${_SSH_PORT}-:22,dns=1.1.1.1${pf_extra}"
+            qcmd+=" -netdev user,id=n0,hostfwd=tcp::${_SSH_PORT}-:22,dns=8.8.4.4${pf_extra}"
             qcmd+=" -object rng-random,filename=/dev/urandom,id=rng0"
             qcmd+=" -device virtio-rng-pci,rng=rng0"
             qcmd+=" -device virtio-balloon-pci"
@@ -1052,7 +1052,7 @@ if command -v docker &>/dev/null; then
     sudo mkdir -p /etc/docker
     sudo tee /etc/docker/daemon.json > /dev/null <<'DF'
 {
-"dns": ["1.1.1.1", "8.8.4.4"],
+"dns": ["8.8.4.4", "1.0.0.1"],
 "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
@@ -1532,7 +1532,7 @@ write_files:
   - path: /etc/docker/daemon.json
     content: |
       {
-"dns": ["1.1.1.1", "8.8.4.4"],
+"dns": ["8.8.4.4", "1.0.0.1"],
 "mtu": 1280,
         "log-driver": "json-file",
         "log-opts": {"max-size": "10m", "max-file": "3"},
