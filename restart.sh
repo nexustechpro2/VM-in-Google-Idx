@@ -207,7 +207,6 @@ systemctl reset-failed docker 2>/dev/null || true
 cat > /etc/docker/daemon.json <<'DOCKEREOF'
 {
   "dns": ["1.1.1.1", "8.8.4.4"],
-  "dns-opts": ["ndots:0", "timeout:2", "attempts:2"],
   "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
