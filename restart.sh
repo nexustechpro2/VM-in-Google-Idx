@@ -139,7 +139,7 @@ if systemctl is-active --quiet systemd-resolved; then
     mkdir -p /etc/systemd/resolved.conf.d
     cat > /etc/systemd/resolved.conf.d/no-stub.conf <<'RESOLVCONF'
 [Resolve]
-DNS=1.1.1.1 8.8.4.4
+DNS=8.8.4.4 1.0.0.1
 DNSStubListener=no
 Domains=~.
 RESOLVCONF
@@ -149,8 +149,8 @@ else
     chattr -i /etc/resolv.conf 2>/dev/null || true
     rm -f /etc/resolv.conf
     cat > /etc/resolv.conf <<'DNSEOF'
-nameserver 1.1.1.1
 nameserver 8.8.4.4
+nameserver 1.0.0.1
 options timeout:2 attempts:2 rotate
 DNSEOF
     chattr +i /etc/resolv.conf 2>/dev/null && \
@@ -206,7 +206,7 @@ systemctl reset-failed docker 2>/dev/null || true
 
 cat > /etc/docker/daemon.json <<'DOCKEREOF'
 {
-  "dns": ["1.1.1.1", "8.8.4.4"],
+  "dns": ["8.8.4.4", "1.0.0.1"],
   "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
@@ -288,8 +288,8 @@ cat > /etc/dnsmasq.conf <<'DNSMASQEOF'
 listen-address=172.18.0.1
 bind-interfaces
 no-resolv
-server=1.1.1.1
 server=8.8.4.4
+server=1.0.0.1
 cache-size=1000
 DNSMASQEOF
 
@@ -489,7 +489,8 @@ if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
     fi
 
     # Fix Wings config — panel may have reset these
-    sed -i 's/    - 8\.8\.8\.8$/    - 8.8.4.4/g' /etc/pelican/config.yml
+    sed -i 's/    - 1\.1\.1\.1$/    - 8.8.4.4/g' /etc/pelican/config.yml
+    sed -i 's/    - 8\.8\.8\.8$/    - 1.0.0.1/g' /etc/pelican/config.yml
     sed -i 's/network_mode: host/network_mode: pelican_nw/' /etc/pelican/config.yml
     echo -e "${GREEN}   ✓ Wings config patched (DNS + network_mode)${NC}"
 
