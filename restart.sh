@@ -501,7 +501,7 @@ fi
     echo -e "${GREEN}   ✓ Started ${TUNNEL_COUNT} Cloudflare tunnel(s)${NC}" || \
     echo -e "${YELLOW}   ⚠ No tunnel tokens found in .pelican.env${NC}"
 
-systemctl start pelican-watchdog 2>/dev/null || true
+# systemctl start pelican-watchdog 2>/dev/null || true
 
 # ============================================================================
 # 8. CLEAR PANEL CACHE + LOCAL POSTGRESQL ANALYZE (pgsql+local only)
