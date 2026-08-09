@@ -87,22 +87,22 @@ ok "xrdp configured (port 3389)"
 # 4 — FIREFOX
 # ============================================================================
 
-log "Installing Firefox (PPA, non-snap)..."
+log "Installing Firefox (Mozilla official repo, non-snap)..."
 snap remove firefox 2>/dev/null || true
 apt-get remove -y firefox 2>/dev/null || true
 apt-get purge  -y firefox 2>/dev/null || true
 
-DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common curl gnupg -qq
+install -d -m 0755 /etc/apt/keyrings
+wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg -O- \
+    | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
 
-echo "deb https://ppa.launchpadcontent.net/mozillateam/ppa/ubuntu noble main" \
-    > /etc/apt/sources.list.d/mozillateam-ppa.list
-curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x0ab215679c571d1c8325275b9316a4342cd0000c" \
-    | gpg --dearmor -o /etc/apt/trusted.gpg.d/mozillateam.gpg
+echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
+    | tee /etc/apt/sources.list.d/mozilla.list > /dev/null
 
-cat > /etc/apt/preferences.d/firefox-no-snap <<'EOF'
-Package: firefox*
-Pin: release o=Ubuntu*
-Pin-Priority: -1
+cat > /etc/apt/preferences.d/mozilla <<'EOF'
+Package: *
+Pin: origin packages.mozilla.org
+Pin-Priority: 1000
 EOF
 
 apt-get update -qq
