@@ -903,6 +903,7 @@ if [[ -z "$PASSWD_HASH" ]]; then
     error "Could not generate password hash — openssl/python3 not found"
     exit 1
 fi
+PASSWD_HASH_SAFE="${PASSWD_HASH//\$/\\\$}"
     cat > /tmp/vps-user-data <<EOF
 #cloud-config
 hostname: $HOSTNAME
@@ -913,7 +914,7 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     lock_passwd: false
-    passwd: $PASSWD_HASH
+    passwd: $PASSWD_HASH_SAFE
 chpasswd:
   list: |
     root:$PASSWORD
