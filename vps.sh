@@ -433,9 +433,10 @@ REMOTE
 
 remote_root_setup() {
     local port=$1 pass=$2
-    sshpass -p "$pass" ssh $SSH_OPTS -p "$port" "root@localhost" bash <<'REMOTE'
+    local vnc_pass="${pass:0:8}"
+    sshpass -p "$pass" ssh $SSH_OPTS -p "$port" "root@localhost" bash <<REMOTE
 set +euo pipefail 2>/dev/null || true
-
+VNC_PASS="${vnc_pass}"
 # Fix Docker bridge linkdown (QEMU hypervisor issue)
 cat > /etc/systemd/system/fix-docker-bridges.service <<'EOF'
 [Unit]
