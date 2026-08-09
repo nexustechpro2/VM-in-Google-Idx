@@ -880,6 +880,22 @@ setup_image() {
     rm -f "$base"
 
     # Cloud-init user-data
+    PASSWD_HASH=""
+if command -v openssl &>/dev/null; then
+    PASSWD_HASH=$(openssl passwd -6 "$PASSWORD" | tr -d '\n')
+else
+    OPENSSL_BIN=$(find /nix/store -name "openssl" -path "*/bin/openssl" 2>/dev/null | head -1)
+    if [[ -n "$OPENSSL_BIN" ]]; then
+        PASSWD_HASH=$($OPENSSL_BIN passwd -6 "$PASSWORD" | tr -d '\n')
+    else
+        PASSWD_HASH=$(python3 -c "import crypt; print(crypt.crypt('$PASSWORD', crypt.mksalt(crypt.METHOD_SHA512)))" 2>/dev/null | tr -d '\n')
+    fi
+fi
+
+if [[ -z "$PASSWD_HASH" ]]; then
+    error "Could not generate password hash — openssl/python3 not found"
+    exit 1
+fi
     cat > /tmp/vps-user-data <<EOF
 #cloud-config
 hostname: $HOSTNAME
@@ -890,13 +906,14 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     lock_passwd: false
-    passwd: $(openssl passwd -6 "$PASSWORD" | tr -d '\n')
+    passwd: $PASSWD_HASH
 chpasswd:
   list: |
     root:$PASSWORD
     $USERNAME:$PASSWORD
   expire: false
 write_files:
+  - path: /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
   - path: /etc/ssh/sshd_config.d/99-nexus.conf
     content: |
       PasswordAuthentication yes
@@ -968,41 +985,6 @@ EOF
 }
 
 # ============================================================================
-# CLOUDFLARE TUNNEL
-# ============================================================================
-
-setup_cf_tunnel() {
-    local port=$1 user=$2 pass=$3 expose=${4:-80}
-    log "Setting up Cloudflare tunnel on port $expose..."
-    sshpass -p "$pass" ssh $SSH_OPTS -p "$port" "${user}@localhost" bash <<EOF
-set +euo pipefail 2>/dev/null || true
-command -v cloudflared &>/dev/null || {
-    curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-        -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
-}
-sudo tee /etc/systemd/system/cloudflared-tunnel.service >/dev/null <<'SVC'
-[Unit]
-Description=Cloudflare Tunnel
-After=network.target
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/cloudflared tunnel --url http://localhost:${expose} --no-autoupdate
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-SVC
-sudo systemctl daemon-reload
-sudo systemctl enable --now cloudflared-tunnel
-sleep 5
-sudo journalctl -u cloudflared-tunnel -n 20 --no-pager 2>/dev/null \
-    | grep -o 'https://.*\.trycloudflare\.com' | tail -1 \
-    | xargs -I{} echo "Public URL: {}"
-EOF
-    ok "Cloudflare tunnel running"
-}
-
-# ============================================================================
 # VM OPERATIONS
 # ============================================================================
 
@@ -1068,13 +1050,6 @@ start_vm() {
     if wait_ssh "$vm"; then
         sleep 10
         post_boot_setup "$SSH_PORT" "$USERNAME" "$PASSWORD"
-
-        read -rp "$(prompt "Cloudflare tunnel? (y/N): ")" cf
-        if [[ "$cf" =~ ^[Yy]$ ]]; then
-            read -rp "$(prompt "Port to expose [80]: ")" cfp
-            setup_cf_tunnel "$SSH_PORT" "$USERNAME" "$PASSWORD" "${cfp:-80}"
-        fi
-
         ssh_into_vm "$vm"
     else
         error "Boot failed — check logs:"
