@@ -281,7 +281,7 @@ sudo systemctl restart systemd-journald 2>/dev/null || true
 sudo mkdir -p /etc/systemd/resolved.conf.d
 sudo tee /etc/systemd/resolved.conf.d/no-stub.conf >/dev/null <<'EOF'
 [Resolve]
-DNS=8.8.4.4 1.0.0.1
+DNS=1.1.1.1 1.0.0.1
 DNSStubListener=no
 Domains=~.
 EOF
@@ -980,7 +980,7 @@ runcmd:
   - sysctl -p /etc/sysctl.d/99-vm-tweaks.conf 2>/dev/null || true
   - systemctl unmask dnsmasq 2>/dev/null || true
   - mkdir -p /etc/systemd/resolved.conf.d
-  - printf '[Resolve]\nDNS=8.8.4.4 1.0.0.1\nDNSStubListener=no\nDomains=~.\n' > /etc/systemd/resolved.conf.d/no-stub.conf
+  - printf '[Resolve]\nDNS=1.1.1.1 1.0.0.1\nDNSStubListener=no\nDomains=~.\n' > /etc/systemd/resolved.conf.d/no-stub.conf
   - systemctl restart systemd-resolved 2>/dev/null || true
   - mkdir -p /etc/systemd/system/docker.service.d
   - bash -c 'ARCH=$(uname -m); if [ "$ARCH" = "aarch64" ]; then printf "[Service]\nEnvironment=\"DOCKER_DEFAULT_PLATFORM=linux/arm64\"\n" > /etc/systemd/system/docker.service.d/platform.conf; else printf "[Service]\nEnvironment=\"DOCKER_DEFAULT_PLATFORM=linux/amd64\"\n" > /etc/systemd/system/docker.service.d/platform.conf; fi'
