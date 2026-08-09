@@ -461,11 +461,12 @@ apt-get install -y tigervnc-standalone-server novnc websockify 2>/dev/null || \
 apt-get install -y tightvncserver novnc websockify 2>/dev/null || true
 
 mkdir -p /root/.vnc
-[ -f /root/.vnc/passwd ] || {
-    # Password set from calling script via env
-    echo "${VNC_PASS:-password}" | vncpasswd -f > /root/.vnc/passwd
-    chmod 600 /root/.vnc/passwd
-}
+if command -v vncpasswd &>/dev/null; then
+    [ -f /root/.vnc/passwd ] || {
+        echo "${VNC_PASS:-password}" | vncpasswd -f > /root/.vnc/passwd
+        chmod 600 /root/.vnc/passwd
+    }
+fi
 
 cat > /root/.vnc/xstartup <<'EOF'
 #!/bin/bash
@@ -598,18 +599,18 @@ EOF
 done
 
 systemctl daemon-reload
-systemctl enable vncserver websockify firefox-vnc
-
-# Start only if not already running
-if systemctl is-active --quiet vncserver; then
-    systemctl is-active --quiet websockify  || systemctl start websockify
-    systemctl is-active --quiet firefox-vnc || systemctl start firefox-vnc
-else
-    systemctl start vncserver
-    sleep 3
-    systemctl start websockify
-    sleep 5
-    systemctl start firefox-vnc
+if command -v vncserver &>/dev/null; then
+    systemctl enable vncserver websockify firefox-vnc 2>/dev/null || true
+    if systemctl is-active --quiet vncserver; then
+        systemctl is-active --quiet websockify  || systemctl start websockify 2>/dev/null || true
+        systemctl is-active --quiet firefox-vnc || systemctl start firefox-vnc 2>/dev/null || true
+    else
+        systemctl start vncserver 2>/dev/null || true
+        sleep 3
+        systemctl start websockify 2>/dev/null || true
+        sleep 5
+        systemctl start firefox-vnc 2>/dev/null || true
+    fi
 fi
 REMOTE
 }
