@@ -1,212 +1,124 @@
 #!/bin/bash
-
 ################################################################################
-# PELICAN AUTO-RESTART SCRIPT v9.6 PRODUCTION READY
-# Fixes from v9.5:
-#   - CRITICAL: Phase 0 no longer pkill -9 dockerd blindly; checks for stale
-#     PID file first and only kills if PID is actually dead
-#   - CRITICAL: Phase 1 waits for /run/docker.sock to exist (not just systemd
-#     "active"), then creates /var/run/docker.sock symlink if missing
-#   - CRITICAL: Phase 6 (Wings) waits for socket before starting Wings, fixes
-#     Wings DNS (8.8.8.8 → 8.8.4.4) and network_mode after every start
-#   - CRITICAL: DNS lock uses only 1.1.1.1 + 8.8.4.4 (8.8.8.8 blocked on IDX)
-#   - ADDED: /etc/hosts nexusserver entry ensured on every run
+# PELICAN AUTO-RESTART SCRIPT v10.0
+# Fixes from all sessions:
+#   - auto_detect_dns: tests all candidates, skips blocked ones (e.g. 8.8.4.4)
+#   - dnsmasq: after-wings ordering drop-in, all-servers racing, only working DNS
+#   - cloudflared: http2 protocol forced, simple type, 120s timeout, token-file
+#   - Wings DNS: always 172.18.0.1 (dnsmasq), never public DNS
+#   - Phase 0: never blindly kills dockerd — checks stale PID only
+#   - dnsmasq restart deferred until after Wings starts (pelican0 must exist)
 ################################################################################
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+set -e
 
-echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║     Pelican Services Restart v9.6      ║${NC}"
-echo -e "${CYAN}║     Production-Safe Restart            ║${NC}"
-echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
-echo ""
-
-if [[ $EUID -ne 0 ]]; then
-   echo -e "${YELLOW}Switching to root...${NC}"
-   SCRIPT_PATH="$(readlink -f /proc/$$/fd/255 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")"
-   sudo bash "$SCRIPT_PATH" "$@"
-   exit $?
-fi
-
-# Find .pelican.env file
-ENV_FILE=""
-for location in \
-    "$(pwd)/.pelican.env" \
-    "/root/newrepo/.pelican.env" \
-    "/workspaces/null/newrepo/.pelican.env" \
-    "/root/.pelican.env" \
-    "$HOME/.pelican.env" \
-    "$(dirname "$0")/.pelican.env"; do
-    if [ -f "$location" ]; then
-        ENV_FILE="$location"
-        break
-    fi
-done
-
-if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE"
-    echo -e "${GREEN}✓ Config loaded: $ENV_FILE${NC}"
-    echo -e "${BLUE}  Domain: ${PANEL_DOMAIN:-not set}${NC}"
-    echo -e "${BLUE}  Database: ${DB_DRIVER:-not set}${NC}"
-    [ -n "$NODE_ID" ] && echo -e "${BLUE}  Node ID: ${NODE_ID}${NC}"
-    [ -n "$PANEL_API_TOKEN" ] && echo -e "${BLUE}  API Token: ${PANEL_API_TOKEN:0:20}...${NC}"
-    echo ""
-else
-    echo -e "${YELLOW}⚠ No .pelican.env found - will use defaults${NC}"
-    echo ""
-fi
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"
-SERVICES_STARTED=0
+hash -r 2>/dev/null || true
 
-# ============================================================================
-# PHASE 0 — HARD STOP EVERYTHING FIRST
-# ============================================================================
-echo -e "${CYAN}[0/8] Stopping all services cleanly...${NC}"
+[[ $EUID -ne 0 ]] && { echo -e "${YELLOW}Switching to root...${NC}"; sudo "$0" "$@"; exit $?; }
 
-# Stop all high-level services first
-systemctl stop wings cloudflared pelican-watchdog supervisor cron 2>/dev/null || true
-echo -e "${GREEN}   ✓ Panel services stopped${NC}"
-
-# Stop web stack
-systemctl stop nginx 2>/dev/null || true
-PHP_VER_STOP=""
-for ver in 8.3 8.4 8.2 8.1; do
-    [ -f "/usr/sbin/php-fpm${ver}" ] && PHP_VER_STOP=$ver && break
+ENV_FILE=""
+for loc in "/root/.pelican.env" "$HOME/.pelican.env" "$(pwd)/.pelican.env"; do
+    [[ -f "$loc" ]] && ENV_FILE="$loc" && break
 done
-[ -n "$PHP_VER_STOP" ] && systemctl stop php${PHP_VER_STOP}-fpm 2>/dev/null || true
-systemctl stop redis-server 2>/dev/null || true
-echo -e "${GREEN}   ✓ Web stack stopped${NC}"
+[[ -z "$ENV_FILE" ]] && ENV_FILE="/root/.pelican.env"
+[[ -f "$ENV_FILE" ]] && source "$ENV_FILE" || true
+[[ -n "${CF_TOKEN_WINGS:-}" ]] && CF_TOKEN="$CF_TOKEN_WINGS"
 
-# Stop all Docker scoped unit slices (game server containers)
-echo -e "${YELLOW}   Stopping Docker container scopes...${NC}"
-systemctl list-units --type=scope --state=running 2>/dev/null \
-    | grep -o 'docker-[a-f0-9]*.scope' \
-    | while read scope; do
-        systemctl stop "$scope" 2>/dev/null || true
-    done
+echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║   Pelican Auto-Restart v10.0          ║${NC}"
+echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
+echo ""
 
-# Stop Docker fully via systemd first
-systemctl stop docker.socket docker containerd 2>/dev/null || true
-sleep 2
+# ============================================================================
+# PHASE 0 — SAFE CLEANUP (never kill running Docker blindly)
+# ============================================================================
+echo -e "${CYAN}[Phase 0] Safe cleanup...${NC}"
 
-# Only kill dockerd if the PID in the pidfile is actually dead
-# (avoids killing a fresh dockerd that systemd just started)
-if [ -f /var/run/docker.pid ]; then
-    DOCKER_PID=$(cat /var/run/docker.pid 2>/dev/null)
-    if [ -n "$DOCKER_PID" ] && ! kill -0 "$DOCKER_PID" 2>/dev/null; then
-        rm -f /var/run/docker.pid
-        echo -e "${YELLOW}   Removed stale docker.pid${NC}"
-    elif [ -n "$DOCKER_PID" ]; then
-        kill -9 "$DOCKER_PID" 2>/dev/null || true
-        rm -f /var/run/docker.pid
-        echo -e "${YELLOW}   Killed stale dockerd PID $DOCKER_PID${NC}"
+# Only kill dockerd if PID file is stale
+if [[ -f /var/run/docker.pid ]]; then
+    DOCKER_PID=$(cat /var/run/docker.pid 2>/dev/null || true)
+    if [[ -n "$DOCKER_PID" ]] && ! kill -0 "$DOCKER_PID" 2>/dev/null; then
+        echo -e "${YELLOW}   Stale Docker PID — removing${NC}"
+        rm -f /var/run/docker.pid /var/run/docker.sock
     fi
 fi
 
 pkill -x wings 2>/dev/null || true
-pkill -9 cloudflared 2>/dev/null || true
-pkill -9 php-fpm 2>/dev/null || true
-pkill -9 nginx 2>/dev/null || true
-pkill -f supervisord 2>/dev/null || true
+pkill cloudflared 2>/dev/null || true
 sleep 2
-
-# Clean up stale socket/pid files
-rm -f /var/run/docker.sock /var/run/docker.pid
-rm -f /run/docker.sock /run/docker.pid
-rm -f /var/run/supervisor.sock /var/run/supervisord.pid
-rm -f /tmp/pelican-backup.lock
-
-echo -e "${GREEN}   ✓ Everything stopped — clean slate${NC}"
-echo ""
+echo -e "${GREEN}   ✓ Cleanup done${NC}"
 
 # ============================================================================
-# Lock DNS — only 1.1.1.1 + 8.8.4.4 (8.8.8.8 is blocked on Google IDX)
-# NOTE: If dnsmasq fails to start with "Cannot assign requested address",
-#       it means systemd-resolved is blocking port 53. Fix once with:
-#         mkdir -p /etc/systemd/resolved.conf.d/
-#         echo -e "[Resolve]\nDNSStubListener=no" \
-#           > /etc/systemd/resolved.conf.d/no-stub.conf
-#         systemctl restart systemd-resolved
+# PHASE 1 — AUTO-DETECT WORKING DNS
 # ============================================================================
+echo -e "${CYAN}[Phase 1] Auto-detecting working DNS servers...${NC}"
+auto_detect_dns() {
+    local CANDIDATES=("1.1.1.1" "1.0.0.1" "8.8.8.8" "9.9.9.9" "8.8.4.4" "149.112.112.112")
+    local TEST_HOST="google.com"
+    local WORKING=()
+    for dns in "${CANDIDATES[@]}"; do
+        MS=$(dig +tries=1 +timeout=3 "$TEST_HOST" "@${dns}" 2>&1 | grep "Query time" | awk '{print $4}')
+        if [[ -n "$MS" ]]; then
+            WORKING+=("$MS $dns")
+            echo -e "${GREEN}   ✓ ${dns} — ${MS}ms${NC}"
+        else
+            echo -e "${YELLOW}   ✗ ${dns} — blocked/timeout${NC}"
+        fi
+    done
+    if [[ ${#WORKING[@]} -eq 0 ]]; then
+        echo -e "${RED}   ✗ All DNS blocked — fallback 1.1.1.1 + 8.8.8.8${NC}"
+        DNS_PRIMARY="1.1.1.1"; DNS_SECONDARY="8.8.8.8"; DNS_ALL=("1.1.1.1" "8.8.8.8"); return
+    fi
+    mapfile -t SORTED < <(printf '%s\n' "${WORKING[@]}" | sort -n)
+    DNS_PRIMARY=$(echo "${SORTED[0]}" | awk '{print $2}')
+    DNS_SECONDARY=$(echo "${SORTED[1]:-${SORTED[0]}}" | awk '{print $2}')
+    DNS_ALL=()
+    for entry in "${SORTED[@]}"; do DNS_ALL+=("$(echo "$entry" | awk '{print $2}')"); done
+    echo -e "${GREEN}   ✓ Primary: ${DNS_PRIMARY} | Secondary: ${DNS_SECONDARY}${NC}"
+}
+auto_detect_dns
+
+# ============================================================================
+# PHASE 2 — FIX SYSTEM DNS
+# ============================================================================
+echo -e "${CYAN}[Phase 2] Fixing system DNS...${NC}"
 tailscale set --accept-dns=false 2>/dev/null || true
+
 if systemctl is-active --quiet systemd-resolved; then
     mkdir -p /etc/systemd/resolved.conf.d
-    cat > /etc/systemd/resolved.conf.d/no-stub.conf <<'RESOLVCONF'
+    cat > /etc/systemd/resolved.conf.d/no-stub.conf <<EOF
 [Resolve]
-DNS=8.8.4.4 1.0.0.1
+DNS=${DNS_PRIMARY} ${DNS_SECONDARY}
 DNSStubListener=no
 Domains=~.
-RESOLVCONF
+EOF
     systemctl restart systemd-resolved
-    echo -e "${GREEN}   ✓ DNS configured via systemd-resolved (1.1.1.1 + 8.8.4.4)${NC}"
+    echo -e "${GREEN}   ✓ systemd-resolved updated (${DNS_PRIMARY} + ${DNS_SECONDARY})${NC}"
 else
-    chattr -i /etc/resolv.conf 2>/dev/null || true
     rm -f /etc/resolv.conf
-    cat > /etc/resolv.conf <<'DNSEOF'
-nameserver 8.8.4.4
-nameserver 1.0.0.1
-options timeout:2 attempts:2 rotate
-DNSEOF
+    cat > /etc/resolv.conf <<EOF
+nameserver ${DNS_PRIMARY}
+nameserver ${DNS_SECONDARY}
+EOF
     chattr +i /etc/resolv.conf 2>/dev/null && \
-        echo -e "${GREEN}   ✓ DNS locked to 1.1.1.1 + 8.8.4.4 (immutable)${NC}" || \
-        echo -e "${GREEN}   ✓ DNS set to 1.1.1.1 + 8.8.4.4 (filesystem lock not supported — OK)${NC}"
-fi
-
-# Ensure hostname resolves locally (prevents sudo warnings + DNS cascade failures)
-grep -q "$(hostname)" /etc/hosts || echo "127.0.1.1 $(hostname)" >> /etc/hosts
-
-# ============================================================================
-# 0.5. START LOCAL POSTGRESQL (only if using local pgsql)
-# ============================================================================
-echo -e "${CYAN}[0.5/8] Starting local PostgreSQL...${NC}"
-
-DB_HOST_VAL=$(grep "^DB_HOST=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
-DB_CONN_VAL=$(grep "^DB_CONNECTION=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
-DB_NAME_VAL=$(grep "^DB_DATABASE=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
-DB_USER_VAL=$(grep "^DB_USERNAME=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
-DB_PASS_VAL=$(grep "^DB_PASSWORD=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2-)
-
-if [ "$DB_CONN_VAL" = "pgsql" ] && \
-   { [ "$DB_HOST_VAL" = "127.0.0.1" ] || [ "$DB_HOST_VAL" = "localhost" ]; }; then
-    systemctl start postgresql 2>/dev/null || true
-    sleep 2
-    if systemctl is-active --quiet postgresql; then
-        echo -e "${GREEN}   ✓ PostgreSQL started${NC}"
-        PGPASSWORD="$DB_PASS_VAL" psql \
-            -h 127.0.0.1 -U "$DB_USER_VAL" -d "$DB_NAME_VAL" \
-            -c "ANALYZE;" >/dev/null 2>&1 && \
-            echo -e "${GREEN}   ✓ PostgreSQL stats refreshed${NC}" || true
-    else
-        echo -e "${RED}   ✗ PostgreSQL failed to start${NC}"
-    fi
-else
-    echo -e "${YELLOW}   ⚠ Using remote/non-pgsql DB — skipping local PostgreSQL${NC}"
+        echo -e "${GREEN}   ✓ DNS locked (${DNS_PRIMARY} + ${DNS_SECONDARY})${NC}" || \
+        echo -e "${GREEN}   ✓ DNS set (${DNS_PRIMARY} + ${DNS_SECONDARY})${NC}"
 fi
 
 # ============================================================================
-# 1. START DOCKER
+# PHASE 3 — FIX DOCKER
 # ============================================================================
-echo -e "${CYAN}[1/8] Starting Docker...${NC}"
+echo -e "${CYAN}[Phase 3] Fixing Docker...${NC}"
 
-# Install dnsmasq if missing — do this first, before Docker touches networking
-if ! command -v dnsmasq &>/dev/null; then
-    echo -e "${YELLOW}   dnsmasq not installed — installing...${NC}"
-    apt-get install -y dnsmasq >/dev/null 2>&1 && \
-        echo -e "${GREEN}   ✓ dnsmasq installed${NC}" || \
-        echo -e "${RED}   ✗ dnsmasq install failed${NC}"
-fi
-
-systemctl reset-failed docker 2>/dev/null || true
-
-cat > /etc/docker/daemon.json <<'DOCKEREOF'
+DNS_JSON=$(printf '"%s",' "${DNS_ALL[@]}" | sed 's/,$//')
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json <<DEOF
 {
-  "dns": ["8.8.4.4", "1.0.0.1"],
+  "dns": [${DNS_JSON}],
   "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
@@ -215,522 +127,205 @@ cat > /etc/docker/daemon.json <<'DOCKEREOF'
   "ip-forward": true,
   "ip-masq": true,
   "storage-driver": "overlay2",
-  "default-ulimits": {
-    "nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}
-  }
+  "default-ulimits": {"nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}}
 }
-DOCKEREOF
+DEOF
 
-mkdir -p /etc/systemd/system/docker.service.d/
-cat > /etc/systemd/system/docker.service.d/platform.conf <<'EOF'
+mkdir -p /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/restart.conf <<'EOF'
 [Service]
-Environment="DOCKER_DEFAULT_PLATFORM=linux/arm64"
+Restart=always
+RestartSec=5
+StartLimitInterval=0
 EOF
-systemctl daemon-reload
 
-HAS_SYSTEMD=false
-if [ -d /run/systemd/system ] && pidof systemd >/dev/null 2>&1; then
-    systemctl stop docker docker.socket 2>/dev/null || true
-    sleep 2
-    systemctl start docker.socket 2>/dev/null || true
-    sleep 1
-    systemctl start docker 2>/dev/null && HAS_SYSTEMD=true
-fi
-
-if [ "$HAS_SYSTEMD" = false ]; then
-    nohup dockerd --config-file /etc/docker/daemon.json > /var/log/docker.log 2>&1 &
-fi
-
-# Wait for the actual socket file — not just systemd "active"
-echo -n "   Waiting for Docker socket"
-for i in {1..30}; do
-    sleep 1
-    echo -n "."
-    if [ -S /run/docker.sock ] || [ -S /var/run/docker.sock ]; then
-        echo ""
-        echo -e "${GREEN}   ✓ Docker socket ready${NC}"
-        break
-    fi
-done
-echo ""
-
-# Ensure /var/run/docker.sock symlink exists (Wings uses this path)
-if [ -S /run/docker.sock ] && [ ! -L /var/run/docker.sock ]; then
-    ln -sf /run/docker.sock /var/run/docker.sock
-    echo -e "${GREEN}   ✓ Created /var/run/docker.sock symlink${NC}"
-fi
-
-# Verify Docker is actually responding
-if docker ps >/dev/null 2>&1; then
-    echo -e "${GREEN}   ✓ Docker started${NC}"
-    ((SERVICES_STARTED++))
+if docker info >/dev/null 2>&1; then
+    echo -e "${GREEN}   ✓ Docker already running${NC}"
+    # Reload config without full restart (live-restore handles this)
+    systemctl daemon-reload
+    systemctl reload-or-restart docker 2>/dev/null || true
+    sleep 3
 else
-    echo -e "${RED}   ✗ Docker failed to start - check: journalctl -u docker or /var/log/docker.log${NC}"
+    systemctl daemon-reload
+    systemctl reset-failed docker 2>/dev/null || true
+    systemctl enable docker 2>/dev/null || true
+    systemctl start docker 2>/dev/null && sleep 5 || {
+        pkill -9 dockerd 2>/dev/null || true
+        rm -f /var/run/docker.sock /var/run/docker.pid; sleep 2
+        nohup dockerd --config-file /etc/docker/daemon.json > /var/log/docker.log 2>&1 &
+        echo -n "   Waiting for Docker"
+        for i in {1..20}; do sleep 1; echo -n "."; docker info >/dev/null 2>&1 && { echo ""; break; }; done
+        echo ""
+    }
 fi
 
-# ----------------------------------------------------------------------------
-# FIX: Google IDX/QEMU hypervisor leaves Docker bridges in linkdown state.
-# ----------------------------------------------------------------------------
+docker info >/dev/null 2>&1 && echo -e "${GREEN}   ✓ Docker running${NC}" || { echo -e "${RED}   ❌ Docker failed${NC}"; exit 1; }
+
+# Fix Docker bridge linkdown (common in QEMU VMs)
 ip link set docker0 up 2>/dev/null || true
 ip link set pelican0 up 2>/dev/null || true
-echo -e "${GREEN}   ✓ Docker bridges brought up (docker0, pelican0)${NC}"
 
-# Install dnsmasq if missing
-if ! command -v dnsmasq &>/dev/null; then
-    echo -e "${YELLOW}   dnsmasq not installed — installing...${NC}"
-    apt-get install -y dnsmasq >/dev/null 2>&1
-    echo -e "${GREEN}   ✓ dnsmasq installed${NC}"
+# ============================================================================
+# PHASE 4 — FIX WINGS CONFIG
+# ============================================================================
+echo -e "${CYAN}[Phase 4] Fixing Wings configuration...${NC}"
+if [[ ! -f /etc/pelican/config.yml ]]; then
+    echo -e "${RED}   ❌ No Wings config found — run wings.sh first${NC}"; exit 1
 fi
 
-# Unmask and configure dnsmasq
-systemctl unmask dnsmasq 2>/dev/null || true
-cat > /etc/dnsmasq.conf <<'DNSMASQEOF'
+cp /etc/pelican/config.yml /etc/pelican/config.yml.restart-backup
+sed -i 's/port: 443/port: 8080/' /etc/pelican/config.yml
+sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml
+sed -i 's/host: 127.0.0.1/host: 0.0.0.0/' /etc/pelican/config.yml
+sed -i 's/IPv6: true/IPv6: false/' /etc/pelican/config.yml
+sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml
+sed -i 's/network_mtu: 1500/network_mtu: 1280/' /etc/pelican/config.yml
+# Always point Wings DNS at dnsmasq — never public DNS directly
+python3 -c "
+import re
+content = open('/etc/pelican/config.yml').read()
+content = re.sub(r'(    dns:)(\n    - [^\n]+)+', '    dns:\n    - 172.18.0.1', content)
+open('/etc/pelican/config.yml', 'w').write(content)
+" 2>/dev/null || sed -i '/dns:/,/name:/ { /- /d }; s/dns:/dns:\n    - 172.18.0.1/' /etc/pelican/config.yml
+sed -i 's/network_mode: host/network_mode: pelican_nw/' /etc/pelican/config.yml
+echo -e "${GREEN}   ✓ Wings config fixed — DNS → 172.18.0.1 (dnsmasq)${NC}"
+
+# ============================================================================
+# PHASE 5 — CONFIGURE DNSMASQ (start deferred until after Wings)
+# ============================================================================
+echo -e "${CYAN}[Phase 5] Configuring dnsmasq...${NC}"
+_build_dnsmasq_servers() { for dns in "${DNS_ALL[@]}"; do echo "server=${dns}"; done; }
+cat > /etc/dnsmasq.conf <<EOF
 listen-address=172.18.0.1
 bind-interfaces
 no-resolv
-server=8.8.4.4
-server=1.0.0.1
-server=1.1.1.1
-server=9.9.9.9
+$(_build_dnsmasq_servers)
 cache-size=1000
 domain-needed
 bogus-priv
 all-servers
-DNSMASQEOF
+EOF
 
-# Ensure systemd-resolved isn't blocking port 53
-mkdir -p /etc/systemd/resolved.conf.d/
-echo -e "[Resolve]\nDNSStubListener=no" > /etc/systemd/resolved.conf.d/no-stub.conf
-systemctl restart systemd-resolved 2>/dev/null || true
-sleep 1
-
-# Wait for pelican0 IP before starting dnsmasq
-echo -n "   Waiting for pelican0 IP"
-for i in {1..15}; do
-    ip addr show pelican0 2>/dev/null | grep -q "172.18.0.1" && break
-    sleep 1
-    echo -n "."
-done
-echo ""
-
+# Ordering fix: dnsmasq must start AFTER wings so pelican0 exists
+mkdir -p /etc/systemd/system/dnsmasq.service.d
+cat > /etc/systemd/system/dnsmasq.service.d/after-wings.conf <<'EOF'
+[Unit]
+After=wings.service
+Wants=wings.service
+EOF
+systemctl daemon-reload
 systemctl enable dnsmasq 2>/dev/null || true
+echo -e "${GREEN}   ✓ dnsmasq configured (will start after Wings)${NC}"
+
+# ============================================================================
+# PHASE 6 — START WINGS
+# ============================================================================
+echo -e "${CYAN}[Phase 6] Starting Wings...${NC}"
+[[ ! -f /etc/systemd/system/wings.service ]] && cat > /etc/systemd/system/wings.service <<'WEOF'
+[Unit]
+Description=Pelican Wings Daemon
+After=docker.service
+Requires=docker.service
+[Service]
+User=root
+WorkingDirectory=/etc/pelican
+LimitNOFILE=4096
+ExecStart=/usr/local/bin/wings
+Restart=always
+RestartSec=5s
+StartLimitInterval=0
+[Install]
+WantedBy=multi-user.target
+WEOF
+
+systemctl daemon-reload
+systemctl enable wings 2>/dev/null || true
+systemctl reset-failed wings 2>/dev/null || true
+systemctl start wings 2>/dev/null || { cd /etc/pelican && nohup wings > /tmp/wings.log 2>&1 &; }
+sleep 5
+systemctl is-active --quiet wings && echo -e "${GREEN}   ✓ Wings running${NC}" || { echo -e "${RED}   ❌ Wings failed — check: journalctl -u wings -n 30${NC}"; exit 1; }
+netstat -tulpn 2>/dev/null | grep -q ":8080" && echo -e "${GREEN}   ✓ Wings on :8080${NC}" || echo -e "${YELLOW}   ⚠ Wings not on :8080 yet${NC}"
+
+# Now start dnsmasq — pelican0 should exist
+sleep 3
 systemctl restart dnsmasq 2>/dev/null || true
 systemctl is-active --quiet dnsmasq && \
-    echo -e "${GREEN}   ✓ dnsmasq running (DNS on 172.18.0.1)${NC}" || \
-    echo -e "${YELLOW}   ⚠ dnsmasq not ready — will recover once pelican0 is up${NC}"
+    echo -e "${GREEN}   ✓ dnsmasq running on 172.18.0.1${NC}" || \
+    echo -e "${YELLOW}   ⚠ dnsmasq failed — check: journalctl -u dnsmasq -n 10${NC}"
+
+# Verify DNS chain: system → dnsmasq → containers
+DNS_HOST_OK=false; DNS_DNSMASQ_OK=false; DNS_CONTAINER_OK=false
+nslookup google.com >/dev/null 2>&1 && DNS_HOST_OK=true
+dig +short google.com @172.18.0.1 >/dev/null 2>&1 && DNS_DNSMASQ_OK=true
+docker run --rm --dns 172.18.0.1 alpine nslookup google.com >/dev/null 2>&1 && DNS_CONTAINER_OK=true
+echo -e "${GREEN}   DNS chain: host=${DNS_HOST_OK} | dnsmasq=${DNS_DNSMASQ_OK} | container=${DNS_CONTAINER_OK}${NC}"
 
 # ============================================================================
-# 2. START REDIS
+# PHASE 7 — CLOUDFLARE TUNNEL
 # ============================================================================
-echo -e "${CYAN}[2/8] Starting Redis...${NC}"
+echo -e "${CYAN}[Phase 7] Starting Cloudflare Tunnel...${NC}"
 
-systemctl start redis-server 2>/dev/null || \
-service redis-server start 2>/dev/null || \
-redis-server --daemonize yes 2>/dev/null || true
-sleep 2
-
-if ! redis-cli ping >/dev/null 2>&1; then
-    echo -e "${YELLOW}   Redis not ready yet — retrying...${NC}"
-    sleep 3
-    systemctl restart redis-server 2>/dev/null || true
-    sleep 2
-fi
-
-if redis-cli ping >/dev/null 2>&1; then
-    echo -e "${GREEN}   ✓ Redis started${NC}"
-    ((SERVICES_STARTED++))
-else
-    echo -e "${RED}   ✗ Redis failed to start${NC}"
-fi
-
-# ============================================================================
-# 3. START PHP-FPM (Unix socket mode)
-# ============================================================================
-echo -e "${CYAN}[3/8] Starting PHP-FPM...${NC}"
-
-PHP_VERSION=""
-for ver in 8.3 8.4 8.2 8.1; do
-    if [ -f "/usr/sbin/php-fpm${ver}" ] || command -v php${ver} &>/dev/null; then
-        PHP_VERSION=$ver
-        break
-    fi
-done
-
-if [ -z "$PHP_VERSION" ]; then
-    echo -e "${RED}   ✗ PHP-FPM not found${NC}"
-else
-    SOCKET_PATH="/run/php/php${PHP_VERSION}-fpm.sock"
-
-    if [ -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf" ]; then
-        sed -i "s|^listen = .*|listen = ${SOCKET_PATH}|" /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-        sed -i 's|^listen.owner = .*|listen.owner = www-data|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-        sed -i 's|^listen.group = .*|listen.group = www-data|' /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
-    fi
-
-    systemctl enable php${PHP_VERSION}-fpm 2>/dev/null || true
-    systemctl start php${PHP_VERSION}-fpm 2>/dev/null || \
-    service php${PHP_VERSION}-fpm start 2>/dev/null || \
-    /usr/sbin/php-fpm${PHP_VERSION} -D 2>/dev/null || true
-    sleep 2
-
-    if [ -S "$SOCKET_PATH" ]; then
-        echo -e "${GREEN}   ✓ PHP-FPM listening on socket: $SOCKET_PATH${NC}"
-        ((SERVICES_STARTED++))
+# Ensure token file exists
+if [[ ! -f /etc/cloudflared/token ]]; then
+    if [[ -n "${CF_TOKEN:-}" ]]; then
+        mkdir -p /etc/cloudflared
+        echo -n "$CF_TOKEN" > /etc/cloudflared/token
+        chmod 600 /etc/cloudflared/token
+        echo -e "${GREEN}   ✓ Token file written from env${NC}"
     else
-        echo -e "${RED}   ✗ PHP-FPM socket not found at $SOCKET_PATH${NC}"
+        echo -e "${RED}   ❌ No CF_TOKEN in env and no token file — skipping cloudflared${NC}"
     fi
 fi
 
-# ============================================================================
-# 4. START NGINX
-# ============================================================================
-echo -e "${CYAN}[4/8] Starting Nginx...${NC}"
-
-if [ -f "/etc/nginx/sites-available/pelican.conf" ] && [ -n "$PHP_VERSION" ]; then
-    SOCKET_PATH="/run/php/php${PHP_VERSION}-fpm.sock"
-    if ! grep -q "fastcgi_pass unix:${SOCKET_PATH}" /etc/nginx/sites-available/pelican.conf 2>/dev/null; then
-        sed -i "s|fastcgi_pass unix:/run/php/php.*-fpm.sock;|fastcgi_pass unix:${SOCKET_PATH};|g" \
-            /etc/nginx/sites-available/pelican.conf 2>/dev/null || true
-        sed -i "s|fastcgi_pass 127.0.0.1:9000;|fastcgi_pass unix:${SOCKET_PATH};|g" \
-            /etc/nginx/sites-available/pelican.conf 2>/dev/null || true
-    fi
-fi
-
-nginx -t 2>/dev/null && {
-    systemctl start nginx 2>/dev/null || \
-    service nginx start 2>/dev/null || \
-    nginx 2>/dev/null || true
-} || {
-    echo -e "${RED}   ✗ Nginx config test failed — check /etc/nginx/sites-available/pelican.conf${NC}"
-}
-sleep 2
-
-if pgrep nginx >/dev/null && (ss -tlnp 2>/dev/null | grep -q ":443"); then
-    echo -e "${GREEN}   ✓ Nginx started (port 443)${NC}"
-    ((SERVICES_STARTED++))
-else
-    echo -e "${RED}   ✗ Nginx failed to start${NC}"
+if [[ -f /etc/cloudflared/token ]]; then
+    # Rewrite service unit with correct settings
+    cat > /etc/systemd/system/cloudflared.service <<'CFEOF'
+[Unit]
+Description=Cloudflare Tunnel client
+After=network-online.target
+Wants=network-online.target
+[Service]
+TimeoutStartSec=120
+Type=simple
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --protocol http2 run --token-file /etc/cloudflared/token
+Restart=on-failure
+RestartSec=5s
+[Install]
+WantedBy=multi-user.target
+CFEOF
+    systemctl daemon-reload
+    systemctl enable cloudflared 2>/dev/null || true
+    systemctl restart cloudflared 2>/dev/null || true
+    sleep 8
+    systemctl is-active --quiet cloudflared && \
+        echo -e "${GREEN}   ✓ Cloudflared running${NC}" || \
+        echo -e "${YELLOW}   ⚠ Cloudflared connecting — check: journalctl -u cloudflared -n 20${NC}"
 fi
 
 # ============================================================================
-# 5. CRON, SUPERVISOR & AUTO-LIMITS
+# PHASE 8 — IPTABLES + VERIFY
 # ============================================================================
-echo -e "${CYAN}[5/8] Starting Cron, Supervisor & Auto-Limits...${NC}"
-
-service cron start 2>/dev/null || cron 2>/dev/null || true
-pgrep cron >/dev/null && \
-    echo -e "${GREEN}   ✓ Cron running${NC}" || \
-    echo -e "${RED}   ✗ Cron failed${NC}"
-
-if [ -f "/usr/local/bin/pelican-db-backup.sh" ]; then
-    if ! crontab -l 2>/dev/null | grep -q "pelican-db-backup"; then
-        (crontab -l 2>/dev/null; echo "*/15 * * * * /usr/local/bin/pelican-db-backup.sh") | crontab -
-        echo -e "${GREEN}   ✓ DB backup cron registered (every 15 mins)${NC}"
-    else
-        echo -e "${GREEN}   ✓ DB backup cron already active${NC}"
-    fi
-else
-    echo -e "${YELLOW}   ⚠ DB backup script not found - skipping${NC}"
-fi
-
-systemctl start supervisor 2>/dev/null || \
-supervisord -c /etc/supervisor/supervisord.conf 2>/dev/null || true
-sleep 3
-
-supervisorctl reread 2>/dev/null || true
-supervisorctl update 2>/dev/null || true
-supervisorctl start pelican-queue 2>/dev/null || \
-supervisorctl restart pelican-queue 2>/dev/null || true
-sleep 2
-pgrep -f "queue:work" >/dev/null && \
-    echo -e "${GREEN}   ✓ Queue worker running${NC}" || \
-    echo -e "${RED}   ✗ Queue worker failed${NC}"
-
-if [ -f "/usr/local/bin/pelican-auto-resource-limits.sh" ]; then
-    /usr/local/bin/pelican-auto-resource-limits.sh && \
-        echo -e "${GREEN}   ✓ Resource limits assigned${NC}" || \
-        echo -e "${YELLOW}   ⚠ Could not assign limits${NC}"
-    pkill -f "pelican-auto-resource-limits-fast.sh" 2>/dev/null || true
-    sleep 1
-    nohup /usr/local/bin/pelican-auto-resource-limits-fast.sh \
-        > /var/log/pelican-auto-limits-fast.log 2>&1 &
-    echo -e "${GREEN}   ✓ Fast auto-limit service restarted${NC}"
-else
-    echo -e "${YELLOW}   ⚠ Resource limits script not found - run plugin setup first${NC}"
-fi
-((SERVICES_STARTED++))
-
-# ============================================================================
-# 6. START WINGS
-# ============================================================================
-echo -e "${CYAN}[6/8] Starting Wings...${NC}"
-
-if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
-    # Ensure Docker socket exists and is responding before Wings starts
-    DOCKER_READY=false
-    for i in {1..15}; do
-        if ([ -S /run/docker.sock ] || [ -S /var/run/docker.sock ]) && docker ps >/dev/null 2>&1; then
-            DOCKER_READY=true
-            break
-        fi
-        echo -e "${YELLOW}   Waiting for Docker socket... ($i/15)${NC}"
-        sleep 2
-    done
-
-    if [ "$DOCKER_READY" = false ]; then
-        echo -e "${YELLOW}   Docker socket not ready — attempting recovery...${NC}"
-        systemctl reset-failed docker 2>/dev/null || true
-        rm -f /var/run/docker.pid
-        systemctl start docker.socket 2>/dev/null || true
-        sleep 2
-        systemctl start docker 2>/dev/null || true
-        sleep 5
-        # Re-create symlink if needed
-   if [ -S /run/docker.sock ] && [ ! -L /var/run/docker.sock ]; then
-    ln -sf /run/docker.sock /var/run/docker.sock
-        fi
-        ip link set docker0 up 2>/dev/null || true
-        ip link set pelican0 up 2>/dev/null || true
-    fi
-
-    # Fix Wings config — panel may have reset these
-   # Always point Wings DNS at local dnsmasq — never public DNS directly
-python3 -c "
-import re, sys
-content = open('/etc/pelican/config.yml').read()
-content = re.sub(r'(    dns:)(\n    - [^\n]+)+', '    dns:\n    - 172.18.0.1', content)
-open('/etc/pelican/config.yml', 'w').write(content)
-" 2>/dev/null || \
-sed -i '/^    dns:/,/^    [^-]/ { /^    - /d }' /etc/pelican/config.yml && \
-sed -i 's/^    dns:/    dns:\n    - 172.18.0.1/' /etc/pelican/config.yml
-sed -i 's/network_mode: host/network_mode: pelican_nw/' /etc/pelican/config.yml
-echo -e "${GREEN}   ✓ Wings DNS → dnsmasq (172.18.0.1), network_mode fixed${NC}"
-    echo -e "${GREEN}   ✓ Wings config patched (DNS + network_mode)${NC}"
-
-    systemctl reset-failed wings 2>/dev/null || true
-    systemctl start wings 2>/dev/null
-
-    echo -n "   Waiting for Wings on port 8080"
-    for i in {1..15}; do
-        sleep 2
-        echo -n "."
-        ss -tlnp 2>/dev/null | grep -q ":8080" && { echo ""; break; }
-    done
-    echo ""
-
-    if systemctl is-active --quiet wings; then
-        echo -e "${GREEN}   ✓ Wings started${NC}"
-        ss -tlnp 2>/dev/null | grep -q ":8080" && \
-            echo -e "${GREEN}   ✓ Wings on port 8080${NC}" || \
-            echo -e "${YELLOW}   ⚠ Wings not on port 8080 yet${NC}"
-        ((SERVICES_STARTED++))
-    else
-        echo -e "${RED}   ✗ Wings failed - check: journalctl -u wings -n 20${NC}"
-    fi
-else
-    echo -e "${YELLOW}   ⚠ Wings not installed${NC}"
-fi
-
-# ============================================================================
-# 7. START CLOUDFLARE TUNNELS
-# ============================================================================
-echo -e "${CYAN}[7/8] Starting Cloudflare Tunnels...${NC}"
-
-TUNNEL_COUNT=0
-
-if [ -n "${CF_TOKEN:-}" ]; then
-    systemctl start cloudflared 2>/dev/null || \
-    nohup cloudflared tunnel run --token "$CF_TOKEN" \
-        > /var/log/cloudflared-panel.log 2>&1 &
-    sleep 3
-    ((TUNNEL_COUNT++))
-fi
-
-if [ -n "${CF_TOKEN_WINGS:-}" ]; then
-    nohup cloudflared tunnel run --token "$CF_TOKEN_WINGS" \
-        > /var/log/cloudflared-wings.log 2>&1 &
-    sleep 3
-    ((TUNNEL_COUNT++))
-fi
-
-[ "$TUNNEL_COUNT" -gt 0 ] && \
-    echo -e "${GREEN}   ✓ Started ${TUNNEL_COUNT} Cloudflare tunnel(s)${NC}" || \
-    echo -e "${YELLOW}   ⚠ No tunnel tokens found in .pelican.env${NC}"
-
-# systemctl start pelican-watchdog 2>/dev/null || true
-
-# ============================================================================
-# 8. CLEAR PANEL CACHE + LOCAL POSTGRESQL ANALYZE (pgsql+local only)
-# ============================================================================
-echo -e "${CYAN}[8/8] Clearing Panel cache...${NC}"
-
-if [ -d "/var/www/pelican" ]; then
-    cd /var/www/pelican
-    PHP_BIN="/usr/bin/php${PHP_VERSION}"
-    [ ! -f "$PHP_BIN" ] && PHP_BIN=$(which php)
-
-    $PHP_BIN artisan cache:clear >/dev/null 2>&1 || true
-    $PHP_BIN artisan config:clear >/dev/null 2>&1 || true
-    $PHP_BIN artisan route:clear >/dev/null 2>&1 || true
-    $PHP_BIN artisan view:clear >/dev/null 2>&1 || true
-    $PHP_BIN artisan event:clear >/dev/null 2>&1 || true
-    $PHP_BIN artisan optimize:clear >/dev/null 2>&1 || true
-    $PHP_BIN artisan queue:restart >/dev/null 2>&1 || true
-    rm -rf storage/framework/views/* 2>/dev/null || true
-    rm -rf storage/framework/cache/* 2>/dev/null || true
-    rm -rf storage/framework/sessions/* 2>/dev/null || true
-    rm -rf bootstrap/cache/* 2>/dev/null || true
-    redis-cli FLUSHALL >/dev/null 2>&1 || true
-
-    $PHP_BIN artisan view:cache >/dev/null 2>&1 || true
-    $PHP_BIN artisan event:cache >/dev/null 2>&1 || true
-
-    echo -e "${GREEN}   ✓ Cache cleared and rebuilt${NC}"
-
-    DB_HOST_VAL=$(grep "^DB_HOST=" .env 2>/dev/null | cut -d'=' -f2)
-    DB_DRIVER_VAL=$(grep "^DB_CONNECTION=" .env 2>/dev/null | cut -d'=' -f2)
-    DB_NAME_VAL=$(grep "^DB_DATABASE=" .env 2>/dev/null | cut -d'=' -f2)
-    DB_USER_VAL=$(grep "^DB_USERNAME=" .env 2>/dev/null | cut -d'=' -f2)
-    DB_PASS_VAL=$(grep "^DB_PASSWORD=" .env 2>/dev/null | cut -d'=' -f2-)
-
-    if [ "$DB_DRIVER_VAL" = "pgsql" ] && \
-       { [ "$DB_HOST_VAL" = "127.0.0.1" ] || [ "$DB_HOST_VAL" = "localhost" ]; }; then
-        echo -e "${YELLOW}   Running ANALYZE on local PostgreSQL...${NC}"
-        PGPASSWORD="$DB_PASS_VAL" psql \
-            -h 127.0.0.1 -U "$DB_USER_VAL" -d "$DB_NAME_VAL" \
-            -c "ANALYZE;" >/dev/null 2>&1 && \
-            echo -e "${GREEN}   ✓ PostgreSQL stats refreshed${NC}" || \
-            echo -e "${YELLOW}   ⚠ ANALYZE skipped (local PostgreSQL not reachable)${NC}"
-    fi
-fi
-
-# ============================================================================
-# BONUS: REPAIR DOCKER NETWORKING IF BROKEN
-# ============================================================================
-echo -e "${CYAN}[BONUS] Checking Docker network health...${NC}"
-if docker info >/dev/null 2>&1; then
-    if ! iptables -L DOCKER-USER -n >/dev/null 2>&1; then
-        echo -e "${YELLOW}   ⚠ Docker iptables chains missing — restarting Docker...${NC}"
-        systemctl restart docker 2>/dev/null || true
-        sleep 5
-        # Re-create symlink after restart
-        if [ -S /run/docker.sock ]; then
-    ln -sf /run/docker.sock /var/run/docker.sock
-        fi
-    fi
-    iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN \
-        -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
-    ip link set docker0 up 2>/dev/null || true
-    ip link set pelican0 up 2>/dev/null || true
-    echo -e "${GREEN}   ✓ Docker network health OK${NC}"
-fi
-
-# ============================================================================
-# STATUS CHECK
-# ============================================================================
-echo ""
-echo -e "${CYAN}╔════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║          Services Status               ║${NC}"
-echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
-echo ""
-
-docker ps >/dev/null 2>&1 && \
-    echo -e "${GREEN}✓ Docker:       Running ($(docker ps -q | wc -l) containers)${NC}" || \
-    echo -e "${RED}✗ Docker:       Not Running${NC}"
-
-redis-cli ping >/dev/null 2>&1 && \
-    echo -e "${GREEN}✓ Redis:        Running${NC}" || \
-    echo -e "${RED}✗ Redis:        Not Running${NC}"
-
-SOCKET_PATH="/run/php/php${PHP_VERSION:-8.3}-fpm.sock"
-[ -S "$SOCKET_PATH" ] && \
-    echo -e "${GREEN}✓ PHP-FPM:      Running (socket: $SOCKET_PATH)${NC}" || \
-    echo -e "${RED}✗ PHP-FPM:      Not Running${NC}"
-
-pgrep nginx >/dev/null && ss -tlnp 2>/dev/null | grep -q ":443" && \
-    echo -e "${GREEN}✓ Nginx:        Running (port 443)${NC}" || \
-    echo -e "${RED}✗ Nginx:        Not Running${NC}"
-
-pgrep cron >/dev/null && \
-    echo -e "${GREEN}✓ Cron:         Running${NC}" || \
-    echo -e "${RED}✗ Cron:         Not Running${NC}"
-
-pgrep supervisord >/dev/null && \
-    echo -e "${GREEN}✓ Supervisor:   Running${NC}" || \
-    echo -e "${RED}✗ Supervisor:   Not Running${NC}"
-
-pgrep -f "queue:work" >/dev/null && \
-    echo -e "${GREEN}✓ Queue Worker: Running${NC}" || \
-    echo -e "${RED}✗ Queue Worker: Not Running${NC}"
-
-pgrep -f "auto-resource-limits-fast" >/dev/null && \
-    echo -e "${GREEN}✓ Auto-Limits:  Running${NC}" || \
-    echo -e "${RED}✗ Auto-Limits:  Not Running${NC}"
-
-systemctl is-active --quiet wings && \
-    echo -e "${GREEN}✓ Wings:        Running (port 8080)${NC}" || \
-    echo -e "${YELLOW}⚠ Wings:        Not Running${NC}"
-
-CF_COUNT=$(pgrep -c cloudflared 2>/dev/null || echo 0)
-[ "$CF_COUNT" -gt 0 ] && \
-    echo -e "${GREEN}✓ Cloudflare:   Running (${CF_COUNT} process)${NC}" || \
-    echo -e "${YELLOW}⚠ Cloudflare:   Not Running${NC}"
-
-systemctl is-active --quiet dnsmasq && \
-    echo -e "${GREEN}✓ dnsmasq:      Running (DNS on 172.18.0.1)${NC}" || \
-    echo -e "${RED}✗ dnsmasq:      Not Running — containers will lose DNS!${NC}"
-
-docker0_state=$(cat /sys/class/net/docker0/operstate 2>/dev/null || echo "unknown")
-pelican0_state=$(cat /sys/class/net/pelican0/operstate 2>/dev/null || echo "unknown")
-echo -e "${GREEN}✓ Bridges:      docker0=${docker0_state}, pelican0=${pelican0_state}${NC}"
-
-# Verify Wings config is correct
-WINGS_DNS=$(grep -A2 'dns:' /etc/pelican/config.yml 2>/dev/null | grep -v 'dns:' | head -1 | tr -d ' -')
-WINGS_NET=$(grep 'network_mode:' /etc/pelican/config.yml 2>/dev/null | awk '{print $2}')
-echo -e "${GREEN}✓ Wings config: DNS=${WINGS_DNS}, network=${WINGS_NET}${NC}"
-
-# Show /var/run/docker.sock symlink status
-if [ -S /var/run/docker.sock ]; then
-    echo -e "${GREEN}✓ Docker sock:  /var/run/docker.sock OK${NC}"
-else
-    echo -e "${RED}✗ Docker sock:  /var/run/docker.sock missing${NC}"
-fi
-
-DB_HOST_CHECK=$(grep "^DB_HOST=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
-DB_CONN_CHECK=$(grep "^DB_CONNECTION=" /var/www/pelican/.env 2>/dev/null | cut -d'=' -f2)
-if [ "$DB_CONN_CHECK" = "pgsql" ] && \
-   { [ "$DB_HOST_CHECK" = "127.0.0.1" ] || [ "$DB_HOST_CHECK" = "localhost" ]; }; then
-    systemctl is-active --quiet postgresql && \
-        echo -e "${GREEN}✓ PostgreSQL:   Running (local)${NC}" || \
-        echo -e "${RED}✗ PostgreSQL:   Not Running${NC}"
-fi
-
-if [ -f "/usr/local/bin/pelican-db-backup.sh" ]; then
-    LAST_SYNC=$(grep "Sync completed" /var/log/pelican-db-backup.log 2>/dev/null | tail -1)
-    [ -n "$LAST_SYNC" ] && \
-        echo -e "${GREEN}✓ DB Backup:    Active (last: $(echo "$LAST_SYNC" | grep -o '\[.*\]'))${NC}" || \
-        echo -e "${YELLOW}⚠ DB Backup:    Script found but never run${NC}"
-fi
-
-PANEL_CODE=$(curl -sk https://${PANEL_DOMAIN:-localhost} \
-    -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
-[ "$PANEL_CODE" = "200" ] || [ "$PANEL_CODE" = "302" ] && \
-    echo -e "${GREEN}✓ Panel:        Responding (HTTP $PANEL_CODE)${NC}" || \
-    echo -e "${RED}✗ Panel:        Not Responding (HTTP $PANEL_CODE)${NC}"
+echo -e "${CYAN}[Phase 8] Final checks...${NC}"
+iptables -C FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+    iptables -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
 
 echo ""
-[ -n "${PANEL_DOMAIN:-}" ] && \
-    echo -e "${CYAN}🌐 Panel:${NC} ${GREEN}https://${PANEL_DOMAIN}${NC}"
-[ -n "${NODE_DOMAIN:-}"  ] && \
-    echo -e "${CYAN}🌐 Wings:${NC} ${GREEN}https://${NODE_DOMAIN}${NC}"
+CHECKS=0
+docker info >/dev/null 2>&1 && { echo -e "${GREEN}  ✓ Docker${NC}"; ((CHECKS++)); }
+systemctl is-active --quiet wings && { echo -e "${GREEN}  ✓ Wings${NC}"; ((CHECKS++)); }
+systemctl is-active --quiet dnsmasq && { echo -e "${GREEN}  ✓ dnsmasq (${DNS_PRIMARY})${NC}"; ((CHECKS++)); }
+systemctl is-active --quiet cloudflared 2>/dev/null && { echo -e "${GREEN}  ✓ Cloudflared${NC}"; ((CHECKS++)); } || echo -e "${YELLOW}  ⚠ Cloudflared connecting${NC}"
+netstat -tulpn 2>/dev/null | grep -q 8080 && { echo -e "${GREEN}  ✓ Wings :8080${NC}"; ((CHECKS++)); }
+curl -s http://localhost:8080/api/system 2>&1 | grep -q "error.*authorization" && { echo -e "${GREEN}  ✓ Wings API${NC}"; ((CHECKS++)); } || echo -e "${YELLOW}  ⚠ Wings API pending${NC}"
+dig +short google.com @172.18.0.1 >/dev/null 2>&1 && { echo -e "${GREEN}  ✓ dnsmasq resolving${NC}"; ((CHECKS++)); }
+
 echo ""
-echo -e "${CYAN}📝 Logs:${NC}"
-echo -e "  Wings:       ${GREEN}journalctl -u wings -f${NC}"
-echo -e "  Panel:       ${GREEN}tail -f /var/log/nginx/pelican.app-error.log${NC}"
-echo -e "  Docker:      ${GREEN}journalctl -u docker -f${NC}"
-echo -e "  Queue:       ${GREEN}supervisorctl tail -f pelican-queue${NC}"
-echo -e "  Auto-Limits: ${GREEN}tail -f /var/log/pelican-auto-limits-fast.log${NC}"
-echo -e "  DB Backup:   ${GREEN}tail -f /var/log/pelican-db-backup.log${NC}"
+echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║   Restart Complete! (${CHECKS}/7)              ║${NC}"
+echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
 echo ""
-echo "restart.sh v9.6"
+echo -e "${CYAN}🧪 TEST:  ${GREEN}curl http://localhost:8080/api/system${NC}"
+echo -e "${CYAN}📋 WINGS: ${GREEN}journalctl -u wings -f${NC}"
+echo -e "${CYAN}📋 CF:    ${GREEN}journalctl -u cloudflared -n 20${NC}"
+echo -e "${CYAN}📋 DNS:   ${GREEN}dig google.com @172.18.0.1${NC}"
