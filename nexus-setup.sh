@@ -1,191 +1,157 @@
 #!/bin/bash
 
-# ============================================================
-#         NEXUS SERVER SETUP SCRIPT
-#         For Existing Ubuntu Servers (Google IDX)
-#         Sets up: SSH, Tailscale, xrdp, sshx, Firefox, Keepalive
-# ============================================================
+# ============================================================================
+# Nexus Server Setup
+# Configures SSH, Tailscale, xrdp, sshx, VNC + noVNC + Firefox
+# ============================================================================
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-print_banner() {
-    echo -e "${CYAN}"
-    echo "============================================================"
-    echo "         NEXUS SERVER SETUP SCRIPT"
-    echo "         Automated Ubuntu Server Configuration"
-    echo "============================================================"
-    echo -e "${NC}"
-}
+log()   { echo -e "\n${BLUE}[*]${NC} $*"; }
+ok()    { echo -e "${GREEN}[✔]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
+error() { echo -e "${RED}[✘]${NC} $*"; }
 
-print_step() {
-    echo -e "\n${BLUE}[*] $1${NC}"
-}
+# ============================================================================
+# ROOT CHECK
+# ============================================================================
 
-print_success() {
-    echo -e "${GREEN}[✔] $1${NC}"
-}
+[[ $EUID -ne 0 ]] && { error "Run as root: sudo bash nexus-setup.sh"; exit 1; }
 
-print_warning() {
-    echo -e "${YELLOW}[!] $1${NC}"
-}
+echo -e "${CYAN}"
+echo "============================================================"
+echo "         Nexus Server Setup"
+echo "         SSH • Tailscale • xrdp • sshx • VNC • Firefox"
+echo "============================================================"
+echo -e "${NC}"
 
-print_error() {
-    echo -e "${RED}[✘] $1${NC}"
-}
+# ============================================================================
+# 1 — SYSTEM UPDATE
+# ============================================================================
 
-# ============================================================
-# CHECK ROOT
-# ============================================================
-if [ "$EUID" -ne 0 ]; then
-    print_error "Please run as root: sudo bash nexus-setup.sh"
-    exit 1
-fi
+log "Updating system packages..."
+apt-get update -qq
+ok "System updated"
 
-print_banner
+# ============================================================================
+# 2 — SSH
+# ============================================================================
 
-# ============================================================
-# STEP 1 — CHECK/SET ROOT PASSWORD
-# ============================================================
-print_step "Checking root password..."
-if passwd -S root | grep -q "^root P"; then
-    print_success "Root password is already set."
-else
-    print_warning "No root password set — skipping (SSH key auth assumed)."
-fi
+log "Configuring SSH..."
+apt-get install -y openssh-server -qq
 
-# ============================================================
-# STEP 2 — UPDATE SYSTEM
-# ============================================================
-print_step "Updating system packages..."
-apt update -y
-print_success "System updated!"
+# Overwrite the cloudimg override that blocks password auth
+cat > /etc/ssh/sshd_config.d/60-cloudimg-settings.conf <<'EOF'
+PasswordAuthentication yes
+PermitRootLogin yes
+EOF
 
-# ============================================================
-# STEP 3 — INSTALL & CONFIGURE SSH
-# ============================================================
-print_step "Installing and configuring SSH..."
+cat > /etc/ssh/sshd_config.d/99-nexus.conf <<'EOF'
+PasswordAuthentication yes
+PermitRootLogin yes
+EOF
 
-apt install openssh-server -y
-
-sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config
-sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
-sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/'       /etc/ssh/sshd_config
+sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
 systemctl enable ssh
 systemctl restart ssh
+ok "SSH configured (port 22, password auth enabled)"
 
-print_success "SSH installed and configured on port 22!"
+# ============================================================================
+# 3 — XRDP
+# ============================================================================
 
-# ============================================================
-# STEP 4 — INSTALL XRDP (REMOTE DESKTOP)
-# ============================================================
-print_step "Installing xrdp and desktop environment..."
+log "Installing xrdp + XFCE..."
+apt-get install -y xfce4 xfce4-goodies xrdp dbus-x11 -qq
 
-apt install -y xfce4 xfce4-goodies xrdp dbus-x11
-
-tee /etc/xrdp/startwm.sh << 'EOF'
+cat > /etc/xrdp/startwm.sh <<'EOF'
 #!/bin/sh
 unset DBUS_SESSION_BUS_ADDRESS
 unset XDG_RUNTIME_DIR
 exec xfce4-session
 EOF
-
 chmod +x /etc/xrdp/startwm.sh
 echo "xfce4-session" > ~/.xsession
 
-sed -i 's/max_bpp=32/max_bpp=16/' /etc/xrdp/xrdp.ini
+sed -i 's/max_bpp=32/max_bpp=16/'   /etc/xrdp/xrdp.ini
 sed -i 's/xserverbpp=24/xserverbpp=16/' /etc/xrdp/xrdp.ini
 
-iptables -A INPUT -p tcp --dport 3389 -j ACCEPT
-
+iptables -A INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
 systemctl enable xrdp
 systemctl restart xrdp
+ok "xrdp configured (port 3389)"
 
-print_success "xrdp installed and configured at 1280x720!"
+# ============================================================================
+# 4 — FIREFOX
+# ============================================================================
 
-# ============================================================
-# STEP 5 — INSTALL FIREFOX
-# ============================================================
-print_step "Installing Firefox..."
+log "Installing Firefox (PPA, non-snap)..."
+snap remove firefox 2>/dev/null || true
+apt-get remove -y firefox 2>/dev/null || true
+apt-get purge  -y firefox 2>/dev/null || true
 
-snap remove firefox
-apt remove firefox -y
-apt purge firefox -y
-
-tee /etc/apt/preferences.d/firefox-no-snap << 'EOF'
+cat > /etc/apt/preferences.d/firefox-no-snap <<'EOF'
 Package: firefox*
 Pin: release o=Ubuntu*
 Pin-Priority: -1
 EOF
 
-add-apt-repository ppa:mozillateam/ppa -y
-apt update
-apt install -t 'o=LP-PPA-mozillateam' firefox -y
+add-apt-repository ppa:mozillateam/ppa -y -q
+apt-get update -qq
+apt-get install -y -t 'o=LP-PPA-mozillateam' firefox
+ok "Firefox installed"
 
-print_success "Firefox installed!"
+# ============================================================================
+# 5 — TAILSCALE
+# ============================================================================
 
-# ============================================================
-# STEP 6 — INSTALL TAILSCALE
-# ============================================================
-print_step "Installing Tailscale..."
-
+log "Installing Tailscale..."
 curl -fsSL https://tailscale.com/install.sh | sh
-
 systemctl enable tailscaled
 systemctl start tailscaled
 
-print_success "Tailscale installed!"
-print_warning "Run 'tailscale up' to login and get your Tailscale IP"
-
 echo ""
-echo -e "${CYAN}Starting Tailscale — please authenticate:${NC}"
+echo -e "${CYAN}Authenticate Tailscale:${NC}"
 tailscale up
-TAILSCALE_IP=$(tailscale ip -4 2>/dev/null)
-if [ -n "$TAILSCALE_IP" ]; then
-    print_success "Tailscale IP: $TAILSCALE_IP"
-fi
+TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || true)
+[[ -n "$TAILSCALE_IP" ]] && ok "Tailscale IP: $TAILSCALE_IP" || warn "Tailscale IP not ready yet"
 
-# Disable Tailscale DNS to prevent search domain interference with Docker
+# Prevent Tailscale DNS from polluting container DNS
 tailscale set --accept-dns=false 2>/dev/null || true
+
+# Lock DNS
 if systemctl is-active --quiet systemd-resolved; then
     mkdir -p /etc/systemd/resolved.conf.d
-    cat > /etc/systemd/resolved.conf.d/no-stub.conf <<'RESOLVCONF'
+    cat > /etc/systemd/resolved.conf.d/no-stub.conf <<'EOF'
 [Resolve]
-DNS=8.8.4.4 1.0.0.1
+DNS=1.1.1.1 8.8.4.4
 DNSStubListener=no
 Domains=~.
-RESOLVCONF
+EOF
     systemctl restart systemd-resolved
-    print_success "DNS configured via systemd-resolved (1.1.1.1 + 8.8.4.4)"
+    ok "DNS: systemd-resolved → 1.1.1.1 + 8.8.4.4 (no stub)"
 else
     chattr -i /etc/resolv.conf 2>/dev/null || true
-    rm -f /etc/resolv.conf
     cat > /etc/resolv.conf <<'EOF'
+nameserver 1.1.1.1
 nameserver 8.8.4.4
-nameserver 1.0.0.1
+options timeout:2 attempts:2
 EOF
-    chattr +i /etc/resolv.conf 2>/dev/null && \
-        print_success "DNS locked to 1.1.1.1 + 8.8.4.4 (immutable)" || \
-        print_success "DNS set to 1.1.1.1 + 8.8.4.4 (filesystem lock not supported — OK)"
+    ok "DNS: /etc/resolv.conf → 1.1.1.1 + 8.8.4.4"
 fi
 
-# ============================================================
-# STEP 7 — INSTALL SSHX (ONE INSTANCE ONLY)
-# ============================================================
-print_step "Installing sshx..."
+# ============================================================================
+# 6 — SSHX
+# ============================================================================
 
-pkill -9 sshx
+log "Installing sshx..."
+pkill -9 sshx 2>/dev/null || true
 sleep 1
-
 curl -sSf https://sshx.io/get | sh
 
-tee /etc/systemd/system/sshx.service << 'EOF'
+cat > /etc/systemd/system/sshx.service <<'EOF'
 [Unit]
 Description=sshx terminal sharing
 After=network.target
@@ -206,46 +172,45 @@ EOF
 systemctl daemon-reload
 systemctl enable sshx
 systemctl start sshx
+ok "sshx installed and running"
 
-print_success "sshx installed and running as a service (single instance)!"
-# ============================================================
-# STEP 9 — DISABLE FREEZE-CAUSING SERVICES
-# ============================================================
-print_step "Disabling services that can cause freezes..."
+# ============================================================================
+# 7 — DISABLE FREEZE-CAUSING SERVICES
+# ============================================================================
 
-systemctl disable --now unattended-upgrades
-systemctl stop packagekit
-systemctl disable packagekit
+log "Disabling freeze-causing services..."
+systemctl disable --now unattended-upgrades 2>/dev/null || true
+systemctl stop    packagekit                2>/dev/null || true
+systemctl disable packagekit                2>/dev/null || true
+ok "unattended-upgrades and packagekit disabled"
 
-print_success "Freeze-causing services disabled!"
+# ============================================================================
+# 8 — VNC + noVNC + Firefox
+# ============================================================================
 
-# ============================================================
-# STEP 8 — INSTALL VNC + noVNC DESKTOP (for IDX Keepalive)
-# ============================================================
-print_step "Installing VNC desktop + noVNC (for 24/7 IDX keepalive)..."
+log "Installing VNC + noVNC + Firefox on VNC..."
+apt-get install -y tightvncserver novnc websockify -qq
 
-apt install -y xfce4 xfce4-goodies tightvncserver novnc websockify
-
-# Set up VNC xstartup
+# VNC xstartup — disable compositing to reduce I/O
 mkdir -p /root/.vnc
-cat > /root/.vnc/xstartup << 'EOF'
+cat > /root/.vnc/xstartup <<'EOF'
 #!/bin/bash
 xrdb $HOME/.Xresources 2>/dev/null || true
+xfconf-query -c xfwm4 -p /general/use_compositing -s false 2>/dev/null || true
 startxfce4 &
 EOF
 chmod +x /root/.vnc/xstartup
 
-# Set VNC password interactively
-print_warning "You will now set a VNC password — use your root password."
-print_warning "When asked 'Would you like a view-only password?' — type: n"
+# VNC password — prompt interactively
+warn "Set a VNC password (max 8 chars). When asked 'view-only password?' → type: n"
 vncpasswd
 
-# Start VNC server
+# Start VNC to initialise
 vncserver -kill :1 2>/dev/null || true
-vncserver :1 -geometry 1280x720 -depth 24
+vncserver :1 -geometry 1280x720 -depth 16
 
-# Install VNC as a systemd service
-tee /etc/systemd/system/vncserver.service > /dev/null << 'VNCSVC'
+# VNC service
+cat > /etc/systemd/system/vncserver.service <<'EOF'
 [Unit]
 Description=TightVNC Server
 After=network.target
@@ -257,39 +222,66 @@ WorkingDirectory=/root
 PIDFile=/root/.vnc/%H:1.pid
 ExecStartPre=-/usr/bin/vncserver -kill :1 2>/dev/null
 ExecStartPre=/bin/sleep 1
-ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 24
+ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 16
 ExecStop=/usr/bin/vncserver -kill :1
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-VNCSVC
+EOF
 
-# Install websockify as a systemd service
-tee /etc/systemd/system/websockify.service > /dev/null << 'WEBSVC'
+# noVNC proxy
+cat > /etc/systemd/system/websockify.service <<'EOF'
 [Unit]
 Description=WebSockify noVNC proxy
-After=network.target vncserver.service
+After=vncserver.service
 Requires=vncserver.service
 
 [Service]
 Type=simple
 User=root
 ExecStartPre=/bin/sleep 3
-ExecStart=/usr/bin/websockify --web=/usr/share/novnc/ 6080 localhost:5901
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc/ --compress-level=1 6080 localhost:5901
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-WEBSVC
+EOF
 
-# Install Firefox VNC service (for keepalive)
-tee /etc/systemd/system/firefox-vnc.service > /dev/null << 'FFVSVC'
+# Firefox on VNC — persistent profile on tmpfs, low I/O
+mkdir -p /root/.firefox-vnc-profile
+cat > /root/.firefox-vnc-profile/user.js <<'EOF'
+user_pref("browser.cache.disk.enable", false);
+user_pref("browser.cache.memory.enable", true);
+user_pref("browser.cache.memory.capacity", 524288);
+user_pref("browser.cache.offline.enable", false);
+user_pref("browser.startup.page", 3);
+user_pref("browser.sessionstore.interval", 3600000);
+user_pref("browser.sessionstore.resume_from_crash", true);
+user_pref("browser.sessionstore.max_resumed_crashes", -1);
+user_pref("browser.sessionstore.max_tabs_undo", 0);
+user_pref("browser.sessionstore.max_windows_undo", 0);
+user_pref("browser.sessionstore.upgradeBackup.maxUpgradeBackups", 0);
+user_pref("dom.ipc.processCount", 1);
+user_pref("browser.tabs.remote.autostart", false);
+user_pref("toolkit.storage.synchronous", 0);
+user_pref("toolkit.cosmeticAnimations.enabled", false);
+user_pref("ui.prefersReducedMotion", 1);
+user_pref("browser.tabs.unloadOnLowMemory", true);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("startup.homepage_override_url", "");
+user_pref("startup.homepage_welcome_url", "");
+EOF
+
+cat > /etc/systemd/system/firefox-vnc.service <<'EOF'
 [Unit]
-Description=Firefox on VNC display for IDX keepalive
-After=network.target websockify.service vncserver.service
+Description=Firefox on VNC display
+After=websockify.service vncserver.service
 Requires=vncserver.service
 
 [Service]
@@ -300,28 +292,15 @@ Environment=HOME=/root
 Environment=MOZ_DISABLE_CRASHREPORTER=1
 Environment=MOZ_CRASHREPORTER_DISABLE=1
 ExecStartPre=/bin/sleep 5
-ExecStartPre=/bin/bash -c 'mkdir -p /tmp/firefox-profile /tmp/firefox-cache'
-ExecStart=/usr/bin/firefox --display=:1 --no-remote --profile /tmp/firefox-profile
+ExecStart=/usr/bin/firefox --display=:1 --no-remote --profile /root/.firefox-vnc-profile
+ExecStop=/bin/bash -c 'pkill -SIGTERM -f "firefox.*firefox-vnc-profile"; sleep 4'
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
-FFVSVC
-
-mkdir -p /tmp/firefox-profile
-cat > /tmp/firefox-profile/user.js << 'FFJS'
-user_pref("browser.cache.disk.enable", false);
-user_pref("browser.cache.memory.enable", true);
-user_pref("browser.cache.memory.capacity", 524288);
-user_pref("browser.sessionstore.interval", 3600000);
-user_pref("browser.sessionstore.resume_from_crash", false);
-user_pref("toolkit.storage.synchronous", 0);
-user_pref("browser.shell.checkDefaultBrowser", false);
-user_pref("datareporting.healthreport.uploadEnabled", false);
-user_pref("dom.ipc.processCount", 1);
-user_pref("browser.tabs.remote.autostart", false);
-FFJS
+EOF
 
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
@@ -330,48 +309,44 @@ sleep 3
 systemctl start websockify
 sleep 5
 systemctl start firefox-vnc
+ok "VNC + noVNC + Firefox running"
 
-TAILSCALE_IP=$(tailscale ip -4 2>/dev/null)
-print_success "VNC desktop installed and running!"
-print_warning "Access your desktop at: http://${TAILSCALE_IP:-YOUR_TAILSCALE_IP}:6080/vnc.html"
+# ============================================================================
+# SUMMARY
+# ============================================================================
 
-# ============================================================
-# FINAL SUMMARY
-# ============================================================
-TAILSCALE_IP=$(tailscale ip -4 2>/dev/null)
+TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "YOUR_TAILSCALE_IP")
 
 echo ""
 echo -e "${CYAN}============================================================${NC}"
-echo -e "${GREEN}         ✅ SETUP COMPLETE!${NC}"
+echo -e "${GREEN}         ✅ SETUP COMPLETE${NC}"
 echo -e "${CYAN}============================================================${NC}"
 echo ""
-echo -e "${GREEN}SSH:${NC}       ssh root@${TAILSCALE_IP:-YOUR_TAILSCALE_IP}"
-echo -e "${GREEN}RDP:${NC}       mstsc → ${TAILSCALE_IP:-YOUR_TAILSCALE_IP} (port 3389)"
-echo -e "${GREEN}VNC:${NC}       http://${TAILSCALE_IP:-YOUR_TAILSCALE_IP}:6080/vnc.html"
-echo -e "${GREEN}Tailscale:${NC} ${TAILSCALE_IP:-Run 'tailscale up' to get IP}"
+echo -e "${GREEN}SSH:${NC}       ssh root@${TAILSCALE_IP}"
+echo -e "${GREEN}RDP:${NC}       ${TAILSCALE_IP}:3389"
+echo -e "${GREEN}VNC:${NC}       http://${TAILSCALE_IP}:6080/vnc.html"
+echo -e "${GREEN}Tailscale:${NC} ${TAILSCALE_IP}"
 echo ""
-echo -e "${YELLOW}Services running:${NC}"
-echo "  ✅ SSH (port 22)"
-echo "  ✅ xrdp (port 3389)"
-echo "  ✅ VNC desktop (port 5901)"
-echo "  ✅ noVNC browser access (port 6080)"
-echo "  ✅ Firefox on VNC (for IDX keepalive)"
-echo "  ✅ sshx (single instance, auto-restart)"
-echo "  ✅ Tailscale (secure tunnel)"
+echo -e "${YELLOW}Services:${NC}"
+for svc in ssh xrdp vncserver websockify firefox-vnc sshx; do
+    systemctl is-active --quiet "$svc" \
+        && echo -e "  ${GREEN}✅${NC} $svc" \
+        || echo -e "  ${RED}❌${NC} $svc"
+done
 echo ""
-echo -e "${CYAN}📌 IDX Keepalive Instructions:${NC}"
-echo -e "  1. Open: ${GREEN}http://${TAILSCALE_IP:-YOUR_TAILSCALE_IP}:6080/vnc.html${NC}"
-echo -e "  2. Inside VNC Firefox → open idx.google.com"
-echo -e "  3. Install Auto Refresh extension → set to 5 minutes"
-echo -e "  4. Close the noVNC tab on your PC (do NOT close Firefox inside VNC)"
+echo -e "${CYAN}IDX Keepalive:${NC}"
+echo "  1. Open: http://${TAILSCALE_IP}:6080/vnc.html"
+echo "  2. In VNC Firefox → open idx.google.com"
+echo "  3. Install Auto Refresh → set 5 min interval"
+echo "  4. Close your local noVNC tab (leave VNC Firefox open)"
 echo ""
-echo -e "${YELLOW}sshx Link:${NC}"
+
 sleep 4
-SSHX_LINK=$(journalctl -u sshx -n 20 --no-pager | grep -o 'https://sshx.io/s/[^ ]*' | head -1)
-if [ -n "$SSHX_LINK" ]; then
-    echo -e "${GREEN}  ➜ $SSHX_LINK${NC}"
+SSHX_LINK=$(journalctl -u sshx -n 20 --no-pager 2>/dev/null | grep -o 'https://sshx.io/s/[^ ]*' | head -1 || true)
+if [[ -n "$SSHX_LINK" ]]; then
+    echo -e "${GREEN}sshx:${NC} $SSHX_LINK"
 else
-    echo -e "${YELLOW}  ⏳ Link not ready yet — run: journalctl -u sshx -n 20 --no-pager${NC}"
+    warn "sshx link not ready — run: journalctl -u sshx -n 20 --no-pager"
 fi
 echo ""
 echo -e "${CYAN}============================================================${NC}"
