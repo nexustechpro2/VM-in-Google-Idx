@@ -92,7 +92,12 @@ snap remove firefox 2>/dev/null || true
 apt-get remove -y firefox 2>/dev/null || true
 apt-get purge  -y firefox 2>/dev/null || true
 
-DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common curl gnupg -qq
+
+echo "deb https://ppa.launchpadcontent.net/mozillateam/ppa/ubuntu noble main" \
+    > /etc/apt/sources.list.d/mozillateam-ppa.list
+curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x0ab215679c571d1c8325275b9316a4342cd0000c" \
+    | gpg --dearmor -o /etc/apt/trusted.gpg.d/mozillateam.gpg
 
 cat > /etc/apt/preferences.d/firefox-no-snap <<'EOF'
 Package: firefox*
@@ -100,7 +105,6 @@ Pin: release o=Ubuntu*
 Pin-Priority: -1
 EOF
 
-add-apt-repository ppa:mozillateam/ppa -y
 apt-get update -qq
 apt-get install -y firefox
 ok "Firefox installed"
