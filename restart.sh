@@ -290,7 +290,12 @@ bind-interfaces
 no-resolv
 server=8.8.4.4
 server=1.0.0.1
+server=1.1.1.1
+server=9.9.9.9
 cache-size=1000
+domain-needed
+bogus-priv
+all-servers
 DNSMASQEOF
 
 # Ensure systemd-resolved isn't blocking port 53
@@ -489,9 +494,17 @@ if [ -f "/usr/local/bin/wings" ] && [ -f "/etc/pelican/config.yml" ]; then
     fi
 
     # Fix Wings config — panel may have reset these
-    sed -i 's/    - 1\.1\.1\.1$/    - 8.8.4.4/g' /etc/pelican/config.yml
-    sed -i 's/    - 8\.8\.8\.8$/    - 1.0.0.1/g' /etc/pelican/config.yml
-    sed -i 's/network_mode: host/network_mode: pelican_nw/' /etc/pelican/config.yml
+   # Always point Wings DNS at local dnsmasq — never public DNS directly
+python3 -c "
+import re, sys
+content = open('/etc/pelican/config.yml').read()
+content = re.sub(r'(    dns:)(\n    - [^\n]+)+', '    dns:\n    - 172.18.0.1', content)
+open('/etc/pelican/config.yml', 'w').write(content)
+" 2>/dev/null || \
+sed -i '/^    dns:/,/^    [^-]/ { /^    - /d }' /etc/pelican/config.yml && \
+sed -i 's/^    dns:/    dns:\n    - 172.18.0.1/' /etc/pelican/config.yml
+sed -i 's/network_mode: host/network_mode: pelican_nw/' /etc/pelican/config.yml
+echo -e "${GREEN}   ✓ Wings DNS → dnsmasq (172.18.0.1), network_mode fixed${NC}"
     echo -e "${GREEN}   ✓ Wings config patched (DNS + network_mode)${NC}"
 
     systemctl reset-failed wings 2>/dev/null || true
