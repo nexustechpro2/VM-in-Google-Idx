@@ -266,7 +266,12 @@ bind-interfaces
 no-resolv
 server=8.8.4.4
 server=1.0.0.1
+server=1.1.1.1
+server=9.9.9.9
 cache-size=1000
+domain-needed
+bogus-priv
+all-servers
 DNSMASQEOF
 systemctl enable dnsmasq 2>/dev/null || true
 systemctl restart dnsmasq 2>/dev/null || true
@@ -523,7 +528,7 @@ sed -i 's/port: 8443/port: 8080/' /etc/pelican/config.yml
 sed -i 's/host: 127.0.0.1/host: 0.0.0.0/' /etc/pelican/config.yml
 sed -i 's/IPv6: true/IPv6: false/' /etc/pelican/config.yml
 sed -i '/ssl:/,/key:/ s/enabled: true/enabled: false/' /etc/pelican/config.yml
-sed -i '/dns:/,/- 1.0.0.1/ c\    dns:\n    - 8.8.4.4\n    - 1.0.0.1' /etc/pelican/config.yml
+sed -i '/dns:/,/- 1.0.0.1/ c\    dns:\n    - 172.18.0.1' /etc/pelican/config.yml
 sed -i 's/network_mtu: 1500/network_mtu: 1280/' /etc/pelican/config.yml
 sed -i '/^      v6:/,/^        gateway:/ s/^/#/' /etc/pelican/config.yml
 if [ "$USE_HOST_NETWORK" = true ]; then
