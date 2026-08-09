@@ -975,7 +975,7 @@ runcmd:
   - systemctl restart systemd-resolved 2>/dev/null || true
   - mkdir -p /etc/systemd/system/docker.service.d
   - mkdir -p /etc/systemd/system/docker.service.d
-  - ARCH=$(uname -m); if [ "$ARCH" = "aarch64" ]; then printf '[Service]\nEnvironment="DOCKER_DEFAULT_PLATFORM=linux/arm64"\n' > /etc/systemd/system/docker.service.d/platform.conf; elif [ "$ARCH" = "x86_64" ]; then printf '[Service]\nEnvironment="DOCKER_DEFAULT_PLATFORM=linux/amd64"\n' > /etc/systemd/system/docker.service.d/platform.conf; fi
+  - bash -c 'ARCH=$(uname -m); if [ "$ARCH" = "aarch64" ]; then printf "[Service]\nEnvironment=\"DOCKER_DEFAULT_PLATFORM=linux/arm64\"\n" > /etc/systemd/system/docker.service.d/platform.conf; elif [ "$ARCH" = "x86_64" ]; then printf "[Service]\nEnvironment=\"DOCKER_DEFAULT_PLATFORM=linux/amd64\"\n" > /etc/systemd/system/docker.service.d/platform.conf; fi'
   - systemctl daemon-reload
   - systemctl disable snapd snapd.socket rsyslog avahi-daemon 2>/dev/null || true
   - groupadd docker 2>/dev/null || true
