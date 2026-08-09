@@ -13,10 +13,6 @@ ok()    { echo -e "${GREEN}[✔]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[✘]${NC} $*"; }
 
-# ============================================================================
-# ROOT CHECK
-# ============================================================================
-
 [[ $EUID -ne 0 ]] && { error "Run as root: sudo bash nexus-setup.sh"; exit 1; }
 
 echo -e "${CYAN}"
@@ -27,11 +23,13 @@ echo "============================================================"
 echo -e "${NC}"
 
 # ============================================================================
-# 1 — SYSTEM UPDATE
+# 1 — SYSTEM UPDATE + APT-UTILS
 # ============================================================================
 
 log "Updating system packages..."
 apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y apt-utils -qq
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
 ok "System updated"
 
 # ============================================================================
@@ -39,9 +37,8 @@ ok "System updated"
 # ============================================================================
 
 log "Configuring SSH..."
-apt-get install -y openssh-server -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server -qq
 
-# Overwrite the cloudimg override that blocks password auth
 cat > /etc/ssh/sshd_config.d/60-cloudimg-settings.conf <<'EOF'
 PasswordAuthentication yes
 PermitRootLogin yes
@@ -52,7 +49,7 @@ PasswordAuthentication yes
 PermitRootLogin yes
 EOF
 
-sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/'       /etc/ssh/sshd_config
+sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/'               /etc/ssh/sshd_config
 sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
 systemctl enable ssh
@@ -60,11 +57,11 @@ systemctl restart ssh
 ok "SSH configured (port 22, password auth enabled)"
 
 # ============================================================================
-# 3 — XRDP
+# 3 — XFCE + XRDP
 # ============================================================================
 
 log "Installing xrdp + XFCE..."
-apt-get install -y xfce4 xfce4-goodies xrdp dbus-x11 -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xrdp dbus-x11 -qq
 
 cat > /etc/xrdp/startwm.sh <<'EOF'
 #!/bin/sh
@@ -73,24 +70,27 @@ unset XDG_RUNTIME_DIR
 exec xfce4-session
 EOF
 chmod +x /etc/xrdp/startwm.sh
-echo "xfce4-session" > ~/.xsession
+echo "xfce4-session" > /root/.xsession
 
-sed -i 's/max_bpp=32/max_bpp=16/'   /etc/xrdp/xrdp.ini
+sed -i 's/max_bpp=32/max_bpp=16/'       /etc/xrdp/xrdp.ini
 sed -i 's/xserverbpp=24/xserverbpp=16/' /etc/xrdp/xrdp.ini
 
-iptables -A INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
 systemctl enable xrdp
 systemctl restart xrdp
 ok "xrdp configured (port 3389)"
 
 # ============================================================================
-# 4 — FIREFOX
+# 4 — FIREFOX (Mozilla official APT repo)
 # ============================================================================
 
 log "Installing Firefox (Mozilla official repo, non-snap)..."
 snap remove firefox 2>/dev/null || true
-apt-get remove -y firefox 2>/dev/null || true
-apt-get purge  -y firefox 2>/dev/null || true
+DEBIAN_FRONTEND=noninteractive apt-get remove -y firefox 2>/dev/null || true
+DEBIAN_FRONTEND=noninteractive apt-get purge  -y firefox 2>/dev/null || true
+
+# Remove stale mozillateam PPA if present from previous runs
+rm -f /etc/apt/sources.list.d/mozillateam-ppa.list
+rm -f /etc/apt/trusted.gpg.d/mozillateam.gpg
 
 install -d -m 0755 /etc/apt/keyrings
 wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg -O- \
@@ -106,7 +106,7 @@ Pin-Priority: 1000
 EOF
 
 apt-get update -qq
-apt-get install -y firefox
+DEBIAN_FRONTEND=noninteractive apt-get install -y firefox
 ok "Firefox installed"
 
 # ============================================================================
@@ -115,16 +115,18 @@ ok "Firefox installed"
 
 log "Installing Tailscale..."
 curl -fsSL https://tailscale.com/install.sh | sh
-systemctl enable tailscaled
-systemctl start tailscaled
+
+systemctl enable tailscaled 2>/dev/null || true
+systemctl start tailscaled 2>/dev/null || true
+sleep 3
 
 echo ""
 echo -e "${CYAN}Authenticate Tailscale:${NC}"
-tailscale up
+tailscale up 2>/dev/null || warn "Tailscale auth needed — run: tailscale up"
+
 TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || true)
 [[ -n "$TAILSCALE_IP" ]] && ok "Tailscale IP: $TAILSCALE_IP" || warn "Tailscale IP not ready yet"
 
-# Prevent Tailscale DNS from polluting container DNS
 tailscale set --accept-dns=false 2>/dev/null || true
 
 # Lock DNS
@@ -137,7 +139,7 @@ DNSStubListener=no
 Domains=~.
 EOF
     systemctl restart systemd-resolved
-    ok "DNS: systemd-resolved → 1.1.1.1 + 8.8.4.4 (no stub)"
+    ok "DNS locked → 1.1.1.1 + 8.8.4.4"
 else
     chattr -i /etc/resolv.conf 2>/dev/null || true
     cat > /etc/resolv.conf <<'EOF'
@@ -145,7 +147,7 @@ nameserver 1.1.1.1
 nameserver 8.8.4.4
 options timeout:2 attempts:2
 EOF
-    ok "DNS: /etc/resolv.conf → 1.1.1.1 + 8.8.4.4"
+    ok "DNS locked → /etc/resolv.conf"
 fi
 
 # ============================================================================
@@ -191,34 +193,39 @@ systemctl disable packagekit                2>/dev/null || true
 ok "unattended-upgrades and packagekit disabled"
 
 # ============================================================================
-# 8 — VNC + noVNC + Firefox
+# 8 — VNC + noVNC + Firefox on VNC
 # ============================================================================
 
-log "Installing VNC + noVNC + Firefox on VNC..."
-apt-get install -y tigervnc-standalone-server novnc websockify apt-utils -qq
+log "Installing VNC + noVNC..."
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    tigervnc-standalone-server novnc websockify -qq
 
-# VNC xstartup — disable compositing to reduce I/O
+# xstartup
 mkdir -p /root/.vnc
 cat > /root/.vnc/xstartup <<'EOF'
 #!/bin/bash
+export XDG_SESSION_TYPE=x11
+export DBUS_SESSION_BUS_ADDRESS=$(dbus-launch --sh-syntax 2>/dev/null | grep DBUS_SESSION_BUS_ADDRESS | cut -d= -f2- | tr -d "';")
 xrdb $HOME/.Xresources 2>/dev/null || true
 xfconf-query -c xfwm4 -p /general/use_compositing -s false 2>/dev/null || true
 startxfce4 &
 EOF
 chmod +x /root/.vnc/xstartup
 
-# VNC password — prompt interactively
-warn "Set a VNC password (max 8 chars). When asked 'view-only password?' → type: n"
+# VNC password
+warn "Set a VNC password (max 8 chars). When asked 'view-only?' → type: n"
 vncpasswd
 
-# Start VNC to initialise
+# Kill any stale instance and start fresh
 vncserver -kill :1 2>/dev/null || true
+sleep 2
 vncserver :1 -geometry 1280x720 -depth 16
+sleep 3
 
-# VNC service
+# VNC systemd service
 cat > /etc/systemd/system/vncserver.service <<'EOF'
 [Unit]
-Description=TightVNC Server
+Description=TigerVNC Server
 After=network.target
 
 [Service]
@@ -227,7 +234,7 @@ User=root
 WorkingDirectory=/root
 PIDFile=/root/.vnc/%H:1.pid
 ExecStartPre=-/usr/bin/vncserver -kill :1 2>/dev/null
-ExecStartPre=/bin/sleep 1
+ExecStartPre=/bin/sleep 2
 ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 16
 ExecStop=/usr/bin/vncserver -kill :1
 Restart=on-failure
@@ -237,7 +244,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# noVNC proxy
+# noVNC proxy service
 cat > /etc/systemd/system/websockify.service <<'EOF'
 [Unit]
 Description=WebSockify noVNC proxy
@@ -256,7 +263,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# Firefox on VNC — persistent profile on tmpfs, low I/O
+# Firefox on VNC service
 mkdir -p /root/.firefox-vnc-profile
 cat > /root/.firefox-vnc-profile/user.js <<'EOF'
 user_pref("browser.cache.disk.enable", false);
@@ -310,6 +317,7 @@ EOF
 
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
+
 systemctl start vncserver
 sleep 3
 systemctl start websockify
@@ -334,25 +342,18 @@ echo -e "${GREEN}VNC:${NC}       http://${TAILSCALE_IP}:6080/vnc.html"
 echo -e "${GREEN}Tailscale:${NC} ${TAILSCALE_IP}"
 echo ""
 echo -e "${YELLOW}Services:${NC}"
-for svc in ssh xrdp vncserver websockify firefox-vnc sshx; do
+for svc in ssh xrdp vncserver websockify firefox-vnc sshx tailscaled; do
     systemctl is-active --quiet "$svc" \
         && echo -e "  ${GREEN}✅${NC} $svc" \
         || echo -e "  ${RED}❌${NC} $svc"
 done
 echo ""
-echo -e "${CYAN}IDX Keepalive:${NC}"
-echo "  1. Open: http://${TAILSCALE_IP}:6080/vnc.html"
-echo "  2. In VNC Firefox → open idx.google.com"
-echo "  3. Install Auto Refresh → set 5 min interval"
-echo "  4. Close your local noVNC tab (leave VNC Firefox open)"
-echo ""
 
 sleep 4
 SSHX_LINK=$(journalctl -u sshx -n 20 --no-pager 2>/dev/null | grep -o 'https://sshx.io/s/[^ ]*' | head -1 || true)
-if [[ -n "$SSHX_LINK" ]]; then
-    echo -e "${GREEN}sshx:${NC} $SSHX_LINK"
-else
-    warn "sshx link not ready — run: journalctl -u sshx -n 20 --no-pager"
-fi
+[[ -n "$SSHX_LINK" ]] \
+    && echo -e "${GREEN}sshx:${NC} $SSHX_LINK" \
+    || warn "sshx link not ready — run: journalctl -u sshx -n 20 --no-pager"
+
 echo ""
 echo -e "${CYAN}============================================================${NC}"
