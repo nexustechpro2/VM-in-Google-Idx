@@ -396,7 +396,8 @@ if [ -f "/etc/php/${PHP_VER}/fpm/pool.d/www.conf" ]; then
 fi
 
 # OPcache
-sudo apt-get install -y "php${PHP_VER}-opcache" 2>/dev/null || true
+sudo apt-get install -y "php${PHP_VER}-opcache" 2>/dev/null || tru
+if [ -d "/etc/php/${PHP_VER}/mods-available" ]; thene
 sudo tee "/etc/php/${PHP_VER}/mods-available/opcache.ini" >/dev/null <<EOF
 zend_extension=opcache
 opcache.enable=1
@@ -411,6 +412,7 @@ realpath_cache_size=4096K
 realpath_cache_ttl=600
 EOF
 sudo phpenmod -v "${PHP_VER}" opcache 2>/dev/null || true
+fi
 sudo systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || true
 
 # Pelican
@@ -434,9 +436,9 @@ REMOTE
 remote_root_setup() {
     local port=$1 pass=$2
     local vnc_pass="${pass:0:8}"
-    sshpass -p "$pass" ssh $SSH_OPTS -p "$port" "root@localhost" bash <<REMOTE
+    VNC_PASS="$vnc_pass" sshpass -p "$pass" ssh $SSH_OPTS -p "$port" "root@localhost" bash <<'REMOTE'
 set +euo pipefail 2>/dev/null || true
-VNC_PASS="${vnc_pass}"
+VNC_PASS="${VNC_PASS:-password}"
 # Fix Docker bridge linkdown (QEMU hypervisor issue)
 cat > /etc/systemd/system/fix-docker-bridges.service <<'EOF'
 [Unit]
@@ -582,7 +584,7 @@ EOF
 fi
 
 # Also write session-restore prefs to any existing real Firefox profile
-for profile in $(find /root/.mozilla/firefox -maxdepth 1 -name "*.default*" -type d 2>/dev/null); do
+for profile in $(find /root/.mozilla/firefox -maxdepth 1 -name "*.default*" -type d 2>/dev/null || true); do
     cat > "$profile/user.js" <<'EOF'
 user_pref("browser.startup.page", 3);
 user_pref("browser.sessionstore.interval", 15000);
