@@ -457,8 +457,8 @@ systemctl enable fix-docker-bridges 2>/dev/null || true
 systemctl start fix-docker-bridges 2>/dev/null || true
 
 # VNC — install TigerVNC if missing (faster than TightVNC)
-apt-get install -y tigervnc-standalone-server novnc websockify 2>/dev/null || \
-apt-get install -y tightvncserver novnc websockify 2>/dev/null || true
+apt-get install -y xfce4 xfce4-goodies tigervnc-standalone-server novnc websockify 2>/dev/null || \
+apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify 2>/dev/null || true
 
 mkdir -p /root/.vnc
 if command -v vncpasswd &>/dev/null; then
@@ -600,6 +600,11 @@ done
 
 systemctl daemon-reload
 if command -v vncserver &>/dev/null; then
+    mkdir -p /root/.vnc
+    [ -f /root/.vnc/passwd ] || {
+        echo "${VNC_PASS:-password}" | vncpasswd -f > /root/.vnc/passwd
+        chmod 600 /root/.vnc/passwd
+    }
     systemctl enable vncserver websockify firefox-vnc 2>/dev/null || true
     if systemctl is-active --quiet vncserver; then
         systemctl is-active --quiet websockify  || systemctl start websockify 2>/dev/null || true
