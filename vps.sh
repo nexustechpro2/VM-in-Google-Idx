@@ -175,7 +175,7 @@ build_netdev() {
             NETDEV_EXTRA+=",hostfwd=tcp::${hp}-:${gp}"
         done
     fi
-    echo "user,id=n0,hostfwd=tcp::${ssh_port}-:22,dns=8.8.4.4${NETDEV_EXTRA}"
+    echo "user,id=n0,hostfwd=tcp::${ssh_port}-:22,dns=1.1.1.1${NETDEV_EXTRA}"
 }
 
 run_qemu() {
@@ -764,7 +764,7 @@ start_watchdog() {
                 -drive file=$_BD/$vm-seed.iso,format=raw,if=virtio,cache=writeback \
                 -boot order=c \
                 -device virtio-net-pci,netdev=n0,rx_queue_size=256,tx_queue_size=256,romfile=,host_mtu=1280 \
-                -netdev user,id=n0,hostfwd=tcp::${_PORT}-:22,dns=8.8.4.4${pf_extra} \
+                -netdev user,id=n0,hostfwd=tcp::${_PORT}-:22,dns=1.1.1.1${pf_extra} \
                 -object rng-random,filename=/dev/urandom,id=rng0 \
                 -device virtio-rng-pci,rng=rng0 -device virtio-balloon-pci \
                 -rtc base=utc,clock=host,driftfix=slew \
