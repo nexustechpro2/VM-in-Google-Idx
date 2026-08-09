@@ -189,7 +189,7 @@ ok "unattended-upgrades and packagekit disabled"
 # ============================================================================
 
 log "Installing VNC + noVNC + Firefox on VNC..."
-apt-get install -y tightvncserver novnc websockify -qq
+apt-get install -y tigervnc-standalone-server novnc websockify -qq
 
 # VNC xstartup — disable compositing to reduce I/O
 mkdir -p /root/.vnc
