@@ -100,9 +100,9 @@ Pin: release o=Ubuntu*
 Pin-Priority: -1
 EOF
 
-add-apt-repository ppa:mozillateam/ppa -y -q
+add-apt-repository ppa:mozillateam/ppa -y
 apt-get update -qq
-apt-get install -y -t 'o=LP-PPA-mozillateam' firefox
+apt-get install -y firefox
 ok "Firefox installed"
 
 # ============================================================================
