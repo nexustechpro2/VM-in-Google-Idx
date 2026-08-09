@@ -322,9 +322,15 @@ if command -v docker &>/dev/null; then
   "default-ulimits": {"nofile": {"Name": "nofile", "Hard": 65535, "Soft": 65535}}
 }
 EOF
-    sudo tee /etc/systemd/system/docker.service.d/platform.conf >/dev/null <<'EOF'
+ARCH=$(uname -m)
+if [ "$ARCH" = "aarch64" ]; then
+    PLATFORM="linux/arm64"
+else
+    PLATFORM="linux/amd64"
+fi
+sudo tee /etc/systemd/system/docker.service.d/platform.conf >/dev/null <<EOF
 [Service]
-Environment="DOCKER_DEFAULT_PLATFORM=linux/arm64"
+Environment="DOCKER_DEFAULT_PLATFORM=${PLATFORM}"
 EOF
     sudo systemctl daemon-reload
     sudo systemctl restart docker 2>/dev/null || true
@@ -967,7 +973,8 @@ runcmd:
   - printf '[Resolve]\nDNS=8.8.4.4 1.0.0.1\nDNSStubListener=no\nDomains=~.\n' > /etc/systemd/resolved.conf.d/no-stub.conf
   - systemctl restart systemd-resolved 2>/dev/null || true
   - mkdir -p /etc/systemd/system/docker.service.d
-  - printf '[Service]\nEnvironment="DOCKER_DEFAULT_PLATFORM=linux/arm64"\n' > /etc/systemd/system/docker.service.d/platform.conf
+  - mkdir -p /etc/systemd/system/docker.service.d
+  - ARCH=$(uname -m); if [ "$ARCH" = "aarch64" ]; then printf '[Service]\nEnvironment="DOCKER_DEFAULT_PLATFORM=linux/arm64"\n' > /etc/systemd/system/docker.service.d/platform.conf; elif [ "$ARCH" = "x86_64" ]; then printf '[Service]\nEnvironment="DOCKER_DEFAULT_PLATFORM=linux/amd64"\n' > /etc/systemd/system/docker.service.d/platform.conf; fi
   - systemctl daemon-reload
   - systemctl disable snapd snapd.socket rsyslog avahi-daemon 2>/dev/null || true
   - groupadd docker 2>/dev/null || true
