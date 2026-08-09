@@ -1560,6 +1560,7 @@ write_files:
       net.ipv4.tcp_tw_reuse=1
       net.ipv4.tcp_fin_timeout=15
 runcmd:
+  - echo -e "PasswordAuthentication yes\nPermitRootLogin yes" > /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
   - echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
   - echo "PermitRootLogin yes" >> /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
   - echo "127.0.1.1 $HOSTNAME" >> /etc/hosts
