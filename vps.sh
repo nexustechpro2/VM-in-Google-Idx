@@ -396,9 +396,9 @@ if [ -f "/etc/php/${PHP_VER}/fpm/pool.d/www.conf" ]; then
 fi
 
 # OPcache
-sudo apt-get install -y "php${PHP_VER}-opcache" 2>/dev/null || tru
-if [ -d "/etc/php/${PHP_VER}/mods-available" ]; thene
-sudo tee "/etc/php/${PHP_VER}/mods-available/opcache.ini" >/dev/null <<EOF
+sudo apt-get install -y "php${PHP_VER}-opcache" 2>/dev/null || true
+if [ -d "/etc/php/${PHP_VER}/mods-available" ]; then
+    sudo tee "/etc/php/${PHP_VER}/mods-available/opcache.ini" >/dev/null <<EOF
 zend_extension=opcache
 opcache.enable=1
 opcache.enable_cli=0
@@ -411,7 +411,7 @@ opcache.huge_code_pages=0
 realpath_cache_size=4096K
 realpath_cache_ttl=600
 EOF
-sudo phpenmod -v "${PHP_VER}" opcache 2>/dev/null || true
+    sudo phpenmod -v "${PHP_VER}" opcache 2>/dev/null || true
 fi
 sudo systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || true
 
