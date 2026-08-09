@@ -309,9 +309,17 @@ EOF
 fi
 
 # ---- Disable dnsmasq (conflicts with Docker DNS on port 53) ----
-sudo systemctl stop dnsmasq 2>/dev/null || true
-sudo systemctl disable dnsmasq 2>/dev/null || true
-sudo systemctl mask dnsmasq 2>/dev/null || true
+# Configure dnsmasq for container DNS on bridge interface
+# Don't mask it — Wings/Docker needs it
+sudo systemctl unmask dnsmasq 2>/dev/null || true
+sudo mkdir -p /etc/systemd/resolved.conf.d
+sudo tee /etc/systemd/resolved.conf.d/no-stub.conf > /dev/null <<'RESOLV'
+[Resolve]
+DNS=8.8.4.4 1.0.0.1
+DNSStubListener=no
+Domains=~.
+RESOLV
+sudo systemctl restart systemd-resolved 2>/dev/null || true
 
 # ---- Network performance tuning ----
 sudo tee /etc/sysctl.d/99-network-perf.conf > /dev/null <<'SYSCTL'
@@ -454,14 +462,20 @@ fi
 # ---- Firefox session restore ----
 FIREFOX_PROFILE=\$(find /root/.config/mozilla/firefox -maxdepth 1 -name "*.default-release" -type d 2>/dev/null | head -1)
 if [[ -n "\$FIREFOX_PROFILE" ]]; then
-    cat > "\$FIREFOX_PROFILE/user.js" <<'USERJS'
+cat > "\$FIREFOX_PROFILE/user.js" <<'USERJS'
 user_pref("browser.startup.page", 3);
 user_pref("browser.sessionstore.resume_from_crash", true);
 user_pref("browser.sessionstore.max_resumed_crashes", -1);
 user_pref("browser.sessionstore.resume_session_once", false);
+user_pref("browser.sessionstore.interval", 15000);
+user_pref("browser.sessionstore.restore_on_demand", false);
+user_pref("browser.sessionstore.restore_pinned_tabs_on_demand", false);
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.healthreport.uploadEnabled", false);
 user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("startup.homepage_override_url", "");
+user_pref("startup.homepage_welcome_url", "");
 USERJS
     echo "Firefox user.js written to \$FIREFOX_PROFILE"
 fi
@@ -551,35 +565,54 @@ User=root
 Environment=DISPLAY=:1
 Environment=HOME=/root
 ExecStartPre=/bin/sleep 5
-ExecStartPre=/bin/bash -c 'mkdir -p /tmp/firefox-cache && mkdir -p /tmp/firefox-ipc'
-ExecStart=/usr/bin/firefox --display=:1 --no-remote --profile /tmp/firefox-profile \
+ExecStartPre=/bin/bash -c 'mkdir -p /root/.firefox-cache && mkdir -p /root/.firefox-ipc'
+ExecStart=/usr/bin/firefox --display=:1 --no-remote --profile /root/.firefox-vnc-profile \
   -MOZ_DISABLE_CONTENT_SANDBOX=1
+ExecStop=/bin/bash -c 'pkill -SIGTERM -f "firefox.*firefox-vnc-profile"; sleep 3'
 Environment=MOZ_DISABLE_CRASHREPORTER=1
 Environment=MOZ_CRASHREPORTER_DISABLE=1
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
 FFVSVC
 
 # Move Firefox cache and profile to tmpfs
-mkdir -p /tmp/firefox-profile
-cat > /tmp/firefox-profile/user.js <<'FFJS'
+mkdir -p /root/.firefox-vnc-profile
+# Only write user.js if profile is new — don't overwrite existing profile data
+if [ ! -f /root/.firefox-vnc-profile/places.sqlite ]; then
+cat > /root/.firefox-vnc-profile/user.js << 'FFJS'
 user_pref("browser.cache.disk.enable", false);
 user_pref("browser.cache.memory.enable", true);
 user_pref("browser.cache.memory.capacity", 524288);
-user_pref("browser.sessionstore.interval", 3600000);
-user_pref("browser.sessionstore.resume_from_crash", false);
-user_pref("browser.privatebrowsing.autostart", false);
+
+// Save session every 15 seconds (not 1 hour)
+user_pref("browser.sessionstore.interval", 15000);
+
+// Restore previous session on startup
+user_pref("browser.startup.page", 3);
+user_pref("browser.sessionstore.resume_from_crash", true);
+user_pref("browser.sessionstore.resume_session_once", false);
+user_pref("browser.sessionstore.max_resumed_crashes", -1);
+
+// Don't warn about restoring tabs
+user_pref("browser.sessionstore.restore_on_demand", false);
+user_pref("browser.sessionstore.restore_pinned_tabs_on_demand", false);
+
 user_pref("toolkit.storage.synchronous", 0);
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.healthreport.uploadEnabled", false);
-user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);
 user_pref("dom.ipc.processCount", 1);
 user_pref("browser.tabs.remote.autostart", false);
-FFJS
 
+// Don't show "Firefox was updated" or welcome tabs on restart
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("startup.homepage_override_url", "");
+user_pref("startup.homepage_welcome_url", "");
+FFJS
+fi
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
 
@@ -1049,7 +1082,7 @@ if command -v docker &>/dev/null; then
     sudo mkdir -p /etc/docker
     sudo tee /etc/docker/daemon.json > /dev/null <<'DF'
 {
-"dns": ["8.8.4.4", "1.0.0.1"],
+"dns": ["8.8.4.4", "1.0.0.1", "1.1.1.1", "9.9.9.9"],
 "mtu": 1280,
   "log-driver": "json-file",
   "log-opts": {"max-size": "10m", "max-file": "3"},
@@ -1187,14 +1220,20 @@ set +euo pipefail 2>/dev/null || true
 
 FIREFOX_PROFILE=\$(find /root/.config/mozilla/firefox -maxdepth 1 -name "*.default-release" -type d 2>/dev/null | head -1)
 if [[ -n "\$FIREFOX_PROFILE" ]]; then
-    cat > "\$FIREFOX_PROFILE/user.js" <<'USERJS'
+cat > "\$FIREFOX_PROFILE/user.js" <<'USERJS'
 user_pref("browser.startup.page", 3);
 user_pref("browser.sessionstore.resume_from_crash", true);
 user_pref("browser.sessionstore.max_resumed_crashes", -1);
 user_pref("browser.sessionstore.resume_session_once", false);
+user_pref("browser.sessionstore.interval", 15000);
+user_pref("browser.sessionstore.restore_on_demand", false);
+user_pref("browser.sessionstore.restore_pinned_tabs_on_demand", false);
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.healthreport.uploadEnabled", false);
 user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("startup.homepage_override_url", "");
+user_pref("startup.homepage_welcome_url", "");
 USERJS
 fi
 
@@ -1274,35 +1313,54 @@ User=root
 Environment=DISPLAY=:1
 Environment=HOME=/root
 ExecStartPre=/bin/sleep 5
-ExecStartPre=/bin/bash -c 'mkdir -p /tmp/firefox-cache && mkdir -p /tmp/firefox-ipc'
-ExecStart=/usr/bin/firefox --display=:1 --no-remote --profile /tmp/firefox-profile \
+ExecStartPre=/bin/bash -c 'mkdir -p /root/.firefox-cache && mkdir -p /root/.firefox-ipc'
+ExecStart=/usr/bin/firefox --display=:1 --no-remote --profile /root/.firefox-vnc-profile \
   -MOZ_DISABLE_CONTENT_SANDBOX=1
+ExecStop=/bin/bash -c 'pkill -SIGTERM -f "firefox.*firefox-vnc-profile"; sleep 3'
 Environment=MOZ_DISABLE_CRASHREPORTER=1
 Environment=MOZ_CRASHREPORTER_DISABLE=1
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
 FFVSVC
 
 # Move Firefox cache and profile to tmpfs
-mkdir -p /tmp/firefox-profile
-cat > /tmp/firefox-profile/user.js <<'FFJS'
+mkdir -p /root/.firefox-vnc-profile
+# Only write user.js if profile is new — don't overwrite existing profile data
+if [ ! -f /root/.firefox-vnc-profile/places.sqlite ]; then
+cat > /root/.firefox-vnc-profile/user.js << 'FFJS'
 user_pref("browser.cache.disk.enable", false);
 user_pref("browser.cache.memory.enable", true);
 user_pref("browser.cache.memory.capacity", 524288);
-user_pref("browser.sessionstore.interval", 3600000);
-user_pref("browser.sessionstore.resume_from_crash", false);
-user_pref("browser.privatebrowsing.autostart", false);
+
+// Save session every 15 seconds (not 1 hour)
+user_pref("browser.sessionstore.interval", 15000);
+
+// Restore previous session on startup
+user_pref("browser.startup.page", 3);
+user_pref("browser.sessionstore.resume_from_crash", true);
+user_pref("browser.sessionstore.resume_session_once", false);
+user_pref("browser.sessionstore.max_resumed_crashes", -1);
+
+// Don't warn about restoring tabs
+user_pref("browser.sessionstore.restore_on_demand", false);
+user_pref("browser.sessionstore.restore_pinned_tabs_on_demand", false);
+
 user_pref("toolkit.storage.synchronous", 0);
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.healthreport.uploadEnabled", false);
-user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);
 user_pref("dom.ipc.processCount", 1);
 user_pref("browser.tabs.remote.autostart", false);
-FFJS
 
+// Don't show "Firefox was updated" or welcome tabs on restart
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("startup.homepage_override_url", "");
+user_pref("startup.homepage_welcome_url", "");
+FFJS
+fi
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
 
@@ -1529,7 +1587,7 @@ write_files:
   - path: /etc/docker/daemon.json
     content: |
       {
-"dns": ["8.8.4.4", "1.0.0.1"],
+"dns": ["8.8.4.4", "1.0.0.1", "1.1.1.1", "9.9.9.9"],
 "mtu": 1280,
         "log-driver": "json-file",
         "log-opts": {"max-size": "10m", "max-file": "3"},
@@ -1577,9 +1635,10 @@ runcmd:
   - journalctl --vacuum-size=1M 2>/dev/null || true
   - modprobe tcp_bbr 2>/dev/null || true
   - sysctl -p /etc/sysctl.d/99-vm-tweaks.conf 2>/dev/null || true
-  - systemctl stop dnsmasq 2>/dev/null || true
-  - systemctl disable dnsmasq 2>/dev/null || true
-  - systemctl mask dnsmasq 2>/dev/null || true
+  - systemctl unmask dnsmasq 2>/dev/null || true
+  - mkdir -p /etc/systemd/resolved.conf.d
+  - printf '[Resolve]\nDNS=8.8.4.4 1.0.0.1\nDNSStubListener=no\nDomains=~.\n' > /etc/systemd/resolved.conf.d/no-stub.conf
+  - systemctl restart systemd-resolved 2>/dev/null || true
   - mkdir -p /etc/systemd/system/docker.service.d && printf '[Service]\nEnvironment="DOCKER_DEFAULT_PLATFORM=linux/arm64"\n' > /etc/systemd/system/docker.service.d/platform.conf
   - systemctl daemon-reload
   - systemctl disable snapd snapd.socket NetworkManager rsyslog tailscaled avahi-daemon 2>/dev/null || true
