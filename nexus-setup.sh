@@ -121,8 +121,8 @@ systemctl start tailscaled 2>/dev/null || true
 sleep 3
 
 echo ""
-echo -e "${CYAN}Authenticate Tailscale:${NC}"
-tailscale up 2>/dev/null || warn "Tailscale auth needed — run: tailscale up"
+echo -e "${CYAN}Authenticate Tailscale — open the link below:${NC}"
+tailscale up || true
 
 TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || true)
 [[ -n "$TAILSCALE_IP" ]] && ok "Tailscale IP: $TAILSCALE_IP" || warn "Tailscale IP not ready yet"
