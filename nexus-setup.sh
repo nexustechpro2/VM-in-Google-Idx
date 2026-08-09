@@ -92,6 +92,8 @@ snap remove firefox 2>/dev/null || true
 apt-get remove -y firefox 2>/dev/null || true
 apt-get purge  -y firefox 2>/dev/null || true
 
+DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common -qq
+
 cat > /etc/apt/preferences.d/firefox-no-snap <<'EOF'
 Package: firefox*
 Pin: release o=Ubuntu*
