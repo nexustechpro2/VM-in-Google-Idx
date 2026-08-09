@@ -888,37 +888,37 @@ setup_image() {
 
     # Cloud-init user-data
     PASSWD_HASH=""
-if command -v openssl &>/dev/null; then
-    PASSWD_HASH=$(openssl passwd -6 "$PASSWORD" | tr -d '\n')
-else
-    OPENSSL_BIN=$(find /nix/store -name "openssl" -path "*/bin/openssl" 2>/dev/null | head -1)
-    if [[ -n "$OPENSSL_BIN" ]]; then
-        PASSWD_HASH=$($OPENSSL_BIN passwd -6 "$PASSWORD" | tr -d '\n')
+    if command -v openssl &>/dev/null; then
+        PASSWD_HASH=$(openssl passwd -6 "$PASSWORD" | tr -d '\n')
     else
-        PASSWD_HASH=$(python3 -c "import crypt; print(crypt.crypt('$PASSWORD', crypt.mksalt(crypt.METHOD_SHA512)))" 2>/dev/null | tr -d '\n')
+        OPENSSL_BIN=$(find /nix/store -name "openssl" -path "*/bin/openssl" 2>/dev/null | head -1)
+        if [[ -n "$OPENSSL_BIN" ]]; then
+            PASSWD_HASH=$($OPENSSL_BIN passwd -6 "$PASSWORD" | tr -d '\n')
+        else
+            PASSWD_HASH=$(python3 -c "import crypt; print(crypt.crypt('$PASSWORD', crypt.mksalt(crypt.METHOD_SHA512)))" 2>/dev/null | tr -d '\n')
+        fi
     fi
-fi
 
-if [[ -z "$PASSWD_HASH" ]]; then
-    error "Could not generate password hash — openssl/python3 not found"
-    exit 1
-fi
-PASSWD_HASH_SAFE="${PASSWD_HASH//\$/\\\$}"
-    cat > /tmp/vps-user-data <<EOF
+    if [[ -z "$PASSWD_HASH" ]]; then
+        error "Could not generate password hash — openssl/python3 not found"
+        exit 1
+    fi
+
+    cat > /tmp/vps-user-data <<'EOF'
 #cloud-config
-hostname: $HOSTNAME
+hostname: __HOSTNAME__
 ssh_pwauth: true
 disable_root: false
 users:
-  - name: $USERNAME
+  - name: __USERNAME__
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     lock_passwd: false
-    passwd: $PASSWD_HASH_SAFE
+    passwd: __PASSWD_HASH__
 chpasswd:
   list: |
-    root:$PASSWORD
-    $USERNAME:$PASSWORD
+    root:__PASSWORD__
+    __USERNAME__:__PASSWORD__
   expire: false
 write_files:
   - path: /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
@@ -927,8 +927,8 @@ write_files:
       PasswordAuthentication yes
       PermitRootLogin yes
     permissions: '0644'
-  - path: /etc/sudoers.d/$USERNAME
-    content: "$USERNAME ALL=(ALL) NOPASSWD:ALL"
+  - path: /etc/sudoers.d/__USERNAME__
+    content: "__USERNAME__ ALL=(ALL) NOPASSWD:ALL"
     permissions: '0440'
   - path: /etc/systemd/journald.conf.d/no-freeze.conf
     content: |
@@ -962,10 +962,10 @@ write_files:
 runcmd:
   - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - echo "127.0.1.1 $HOSTNAME" >> /etc/hosts
-  - id $USERNAME || useradd -m -s /bin/bash -G sudo $USERNAME
-  - echo "$USERNAME:$PASSWORD" | chpasswd
-  - echo "root:$PASSWORD" | chpasswd
+  - echo "127.0.1.1 __HOSTNAME__" >> /etc/hosts
+  - id __USERNAME__ || useradd -m -s /bin/bash -G sudo __USERNAME__
+  - echo "__USERNAME__:__PASSWORD__" | chpasswd
+  - echo "root:__PASSWORD__" | chpasswd
   - systemctl restart ssh || systemctl restart sshd || true
   - systemctl restart systemd-journald
   - modprobe tcp_bbr 2>/dev/null || true
@@ -975,13 +975,19 @@ runcmd:
   - printf '[Resolve]\nDNS=8.8.4.4 1.0.0.1\nDNSStubListener=no\nDomains=~.\n' > /etc/systemd/resolved.conf.d/no-stub.conf
   - systemctl restart systemd-resolved 2>/dev/null || true
   - mkdir -p /etc/systemd/system/docker.service.d
-  - mkdir -p /etc/systemd/system/docker.service.d
-  - bash -c 'ARCH=$(uname -m); if [ "$ARCH" = "aarch64" ]; then printf "[Service]\nEnvironment=\"DOCKER_DEFAULT_PLATFORM=linux/arm64\"\n" > /etc/systemd/system/docker.service.d/platform.conf; elif [ "$ARCH" = "x86_64" ]; then printf "[Service]\nEnvironment=\"DOCKER_DEFAULT_PLATFORM=linux/amd64\"\n" > /etc/systemd/system/docker.service.d/platform.conf; fi'
+  - bash -c 'ARCH=$(uname -m); if [ "$ARCH" = "aarch64" ]; then printf "[Service]\nEnvironment=\"DOCKER_DEFAULT_PLATFORM=linux/arm64\"\n" > /etc/systemd/system/docker.service.d/platform.conf; else printf "[Service]\nEnvironment=\"DOCKER_DEFAULT_PLATFORM=linux/amd64\"\n" > /etc/systemd/system/docker.service.d/platform.conf; fi'
   - systemctl daemon-reload
   - systemctl disable snapd snapd.socket rsyslog avahi-daemon 2>/dev/null || true
   - groupadd docker 2>/dev/null || true
   - touch /etc/cloud/cloud-init.disabled
 EOF
+
+    sed -i \
+        -e "s|__HOSTNAME__|${HOSTNAME}|g" \
+        -e "s|__USERNAME__|${USERNAME}|g" \
+        -e "s|__PASSWORD__|${PASSWORD}|g" \
+        -e "s|__PASSWD_HASH__|${PASSWD_HASH}|g" \
+        /tmp/vps-user-data
 
     cat > /tmp/vps-meta-data <<EOF
 instance-id: iid-$VM_NAME
