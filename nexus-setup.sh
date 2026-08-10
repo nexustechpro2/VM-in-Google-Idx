@@ -263,9 +263,15 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# Firefox on VNC service
-mkdir -p /root/.firefox-vnc-profile
-cat > /root/.firefox-vnc-profile/user.js <<'EOF'
+# Firefox persistent profile — only initialise once
+mkdir -p /root/.firefox-vnc-profile/extensions
+
+# Pre-install Auto Refresh extension
+curl -fsSL "https://addons.mozilla.org/firefox/downloads/file/4937205/auto_refresh_url-1.0.34.xpi" \
+    -o "/root/.firefox-vnc-profile/extensions/{9cf28bf3-b2e3-4912-b703-ad49a17b97c8}.xpi" 2>/dev/null || true
+
+if [ ! -f /root/.firefox-vnc-profile/places.sqlite ]; then
+    cat > /root/.firefox-vnc-profile/user.js <<'EOF'
 user_pref("browser.cache.disk.enable", false);
 user_pref("browser.cache.memory.enable", true);
 user_pref("browser.cache.memory.capacity", 524288);
@@ -289,6 +295,8 @@ user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);
 user_pref("browser.startup.homepage_override.mstone", "ignore");
 user_pref("startup.homepage_override_url", "");
 user_pref("startup.homepage_welcome_url", "");
+user_pref("extensions.autoDisableScopes", 0);
+user_pref("extensions.enabledScopes", 15);
 EOF
 
 cat > /etc/systemd/system/firefox-vnc.service <<'EOF'
@@ -319,7 +327,7 @@ systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
 
 systemctl start vncserver
-sleep 3
+sleep 8
 systemctl start websockify
 sleep 5
 systemctl start firefox-vnc
