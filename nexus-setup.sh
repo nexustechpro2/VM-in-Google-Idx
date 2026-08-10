@@ -255,7 +255,7 @@ Requires=vncserver.service
 Type=simple
 User=root
 ExecStartPre=/bin/sleep 3
-ExecStart=/usr/bin/websockify --web=/usr/share/novnc/ --compress-level=1 6080 localhost:5901
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc/ 6080 localhost:5901
 Restart=always
 RestartSec=5
 
