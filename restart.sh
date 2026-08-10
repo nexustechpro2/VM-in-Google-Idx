@@ -241,7 +241,7 @@ WEOF
 systemctl daemon-reload
 systemctl enable wings 2>/dev/null || true
 systemctl reset-failed wings 2>/dev/null || true
-systemctl start wings 2>/dev/null || { cd /etc/pelican && nohup wings > /tmp/wings.log 2>&1 &; }
+systemctl start wings 2>/dev/null || { cd /etc/pelican && nohup wings > /tmp/wings.log 2>&1 & }
 sleep 5
 systemctl is-active --quiet wings && echo -e "${GREEN}   ✓ Wings running${NC}" || { echo -e "${RED}   ❌ Wings failed — check: journalctl -u wings -n 30${NC}"; exit 1; }
 netstat -tulpn 2>/dev/null | grep -q ":8080" && echo -e "${GREEN}   ✓ Wings on :8080${NC}" || echo -e "${YELLOW}   ⚠ Wings not on :8080 yet${NC}"
