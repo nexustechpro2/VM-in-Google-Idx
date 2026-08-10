@@ -425,7 +425,7 @@ if [ "$PELICAN_FOUND" = "true" ]; then
     echo "Pelican detected — running restart.sh..."
     if curl -fsSL "${BASE_URL}/restart.sh" -o /tmp/nexus-restart.sh 2>/dev/null; then
         chmod +x /tmp/nexus-restart.sh
-        sudo bash /tmp/nexus-restart.sh </dev/null 2>&1 | tee /var/log/nexus-restart.log || true
+        sudo bash /tmp/nexus-restart.sh </dev/null 2>&1 | sudo tee /var/log/nexus-restart.log || true
         rm -f /tmp/nexus-restart.sh
         sudo systemctl restart cloudflared 2>/dev/null || true
     fi
