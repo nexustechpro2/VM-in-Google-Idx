@@ -520,7 +520,7 @@ WEOF
 if [[ "$HAS_SYSTEMD" == true ]]; then
     systemctl daemon-reload
     systemctl enable wings 2>/dev/null || true
-    systemctl start wings 2>/dev/null || { cd /etc/pelican && nohup wings > /tmp/wings.log 2>&1 &; }
+    systemctl start wings 2>/dev/null || { cd /etc/pelican && nohup wings > /tmp/wings.log 2>&1 & }
 else
     cd /etc/pelican && nohup wings > /tmp/wings.log 2>&1 &
 fi
