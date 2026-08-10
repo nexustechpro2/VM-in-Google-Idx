@@ -470,9 +470,10 @@ fi
 
 cat > /root/.vnc/xstartup <<'EOF'
 #!/bin/bash
-xrdb $HOME/.Xresources 2>/dev/null || true
-xfconf-query -c xfwm4 -p /general/use_compositing -s false 2>/dev/null || true
-startxfce4 &
+export XDG_SESSION_TYPE=x11
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+exec startxfce4
 EOF
 chmod +x /root/.vnc/xstartup
 
@@ -482,13 +483,11 @@ cat > /etc/systemd/system/vncserver.service <<'EOF'
 Description=TigerVNC Server
 After=network.target
 [Service]
-Type=forking
+Type=simple
 User=root
 WorkingDirectory=/root
-PIDFile=/root/.vnc/%H:1.pid
-ExecStartPre=-/usr/bin/vncserver -kill :1 2>/dev/null
-ExecStartPre=/bin/sleep 1
-ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 16
+ExecStartPre=/bin/sh -c 'vncserver -kill :1 2>/dev/null; sleep 2; true'
+ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 16 -fg
 ExecStop=/usr/bin/vncserver -kill :1
 Restart=on-failure
 RestartSec=5
