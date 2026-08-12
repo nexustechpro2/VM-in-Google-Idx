@@ -13,6 +13,8 @@ ok()    { echo -e "${GREEN}[✔]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[✘]${NC} $*"; }
 
+[[ $EUID -ne 0 ]] && { error "Run as root: sudo bash nexus-setup.sh"; exit 1; }
+
 auto_detect_dns() {
     local CANDIDATES=("1.1.1.1" "1.0.0.1" "8.8.8.8" "9.9.9.9" "8.8.4.4")
     local TEST_HOST="google.com"
@@ -30,9 +32,6 @@ auto_detect_dns() {
     DNS_PRIMARY=$(echo "${SORTED[0]}" | awk '{print $2}')
     DNS_SECONDARY=$(echo "${SORTED[1]:-${SORTED[0]}}" | awk '{print $2}')
 }
-
-
-[[ $EUID -ne 0 ]] && { error "Run as root: sudo bash nexus-setup.sh"; exit 1; }
 auto_detect_dns
 
 echo -e "${CYAN}"
@@ -108,7 +107,6 @@ snap remove firefox 2>/dev/null || true
 DEBIAN_FRONTEND=noninteractive apt-get remove -y firefox 2>/dev/null || true
 DEBIAN_FRONTEND=noninteractive apt-get purge  -y firefox 2>/dev/null || true
 
-# Remove stale mozillateam PPA if present from previous runs
 rm -f /etc/apt/sources.list.d/mozillateam-ppa.list
 rm -f /etc/apt/trusted.gpg.d/mozillateam.gpg
 
@@ -221,14 +219,15 @@ log "Installing VNC + noVNC..."
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
     tigervnc-standalone-server novnc websockify -qq
 
-# xstartup
+# xstartup — fixed dbus launch
 mkdir -p /root/.vnc
 cat > /root/.vnc/xstartup <<'EOF'
 #!/bin/bash
+export DISPLAY=:1
 export XDG_SESSION_TYPE=x11
-export DBUS_SESSION_BUS_ADDRESS=$(dbus-launch --sh-syntax 2>/dev/null | grep DBUS_SESSION_BUS_ADDRESS | cut -d= -f2- | tr -d "';")
-xrdb $HOME/.Xresources 2>/dev/null || true
-xfconf-query -c xfwm4 -p /general/use_compositing -s false 2>/dev/null || true
+unset DBUS_SESSION_BUS_ADDRESS
+eval $(dbus-launch --sh-syntax)
+export DBUS_SESSION_BUS_ADDRESS
 exec startxfce4
 EOF
 chmod +x /root/.vnc/xstartup
@@ -238,12 +237,13 @@ warn "Set a VNC password (max 8 chars). When asked 'view-only?' → type: n"
 vncpasswd
 
 # Kill any stale instance and start fresh
-vncserver -kill :1 2>/dev/null || true
+pkill Xtigervnc 2>/dev/null || true
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 sleep 2
 vncserver :1 -geometry 1280x720 -depth 16
 sleep 3
 
-# VNC systemd service
+# VNC systemd service — ExecStartPre kill is optional (-) so it never fails
 cat > /etc/systemd/system/vncserver.service <<'EOF'
 [Unit]
 Description=TigerVNC Server
@@ -254,8 +254,7 @@ Type=forking
 User=root
 WorkingDirectory=/root
 PIDFile=/root/.vnc/%H:1.pid
-ExecStartPre=-/usr/bin/vncserver -kill :1 2>/dev/null
-ExecStartPre=/bin/sleep 2
+ExecStartPre=-/bin/bash -c 'pkill Xtigervnc; rm -f /tmp/.X1-lock /tmp/.X11-unix/X1; sleep 2'
 ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 16
 ExecStop=/usr/bin/vncserver -kill :1
 Restart=on-failure
@@ -287,7 +286,6 @@ EOF
 # Firefox persistent profile — only initialise once
 mkdir -p /root/.firefox-vnc-profile/extensions
 
-# Pre-install Auto Refresh extension
 curl -fsSL "https://addons.mozilla.org/firefox/downloads/file/4937205/auto_refresh_url-1.0.34.xpi" \
     -o "/root/.firefox-vnc-profile/extensions/{9cf28bf3-b2e3-4912-b703-ad49a17b97c8}.xpi" 2>/dev/null || true
 
@@ -319,6 +317,7 @@ user_pref("startup.homepage_welcome_url", "");
 user_pref("extensions.autoDisableScopes", 0);
 user_pref("extensions.enabledScopes", 15);
 EOF
+fi
 
 cat > /etc/systemd/system/firefox-vnc.service <<'EOF'
 [Unit]
@@ -347,13 +346,11 @@ EOF
 systemctl daemon-reload
 systemctl enable vncserver websockify firefox-vnc
 
-systemctl start vncserver
-sleep 8
+# vncserver is already running from the manual start above, so just start the rest
 systemctl start websockify
 sleep 5
 systemctl start firefox-vnc
 ok "VNC + noVNC + Firefox running"
-fi
 
 # ============================================================================
 # SUMMARY
