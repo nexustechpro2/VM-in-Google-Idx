@@ -13,7 +13,27 @@ ok()    { echo -e "${GREEN}[✔]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[✘]${NC} $*"; }
 
+auto_detect_dns() {
+    local CANDIDATES=("1.1.1.1" "1.0.0.1" "8.8.8.8" "9.9.9.9" "8.8.4.4")
+    local TEST_HOST="google.com"
+    local WORKING=()
+    for dns in "${CANDIDATES[@]}"; do
+        MS=$(dig +tries=1 +timeout=3 "$TEST_HOST" "@${dns}" 2>&1 | grep "Query time" | awk '{print $4}')
+        if [[ -n "$MS" ]]; then
+            WORKING+=("$MS $dns")
+        fi
+    done
+    if [[ ${#WORKING[@]} -eq 0 ]]; then
+        DNS_PRIMARY="1.1.1.1"; DNS_SECONDARY="8.8.4.4"; return
+    fi
+    mapfile -t SORTED < <(printf '%s\n' "${WORKING[@]}" | sort -n)
+    DNS_PRIMARY=$(echo "${SORTED[0]}" | awk '{print $2}')
+    DNS_SECONDARY=$(echo "${SORTED[1]:-${SORTED[0]}}" | awk '{print $2}')
+}
+
+
 [[ $EUID -ne 0 ]] && { error "Run as root: sudo bash nexus-setup.sh"; exit 1; }
+auto_detect_dns
 
 echo -e "${CYAN}"
 echo "============================================================"
@@ -127,27 +147,28 @@ tailscale up || true
 TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || true)
 [[ -n "$TAILSCALE_IP" ]] && ok "Tailscale IP: $TAILSCALE_IP" || warn "Tailscale IP not ready yet"
 
+log "Configuring DNS..."
 tailscale set --accept-dns=false 2>/dev/null || true
 
-# Lock DNS
 if systemctl is-active --quiet systemd-resolved; then
     mkdir -p /etc/systemd/resolved.conf.d
-    cat > /etc/systemd/resolved.conf.d/no-stub.conf <<'EOF'
+    cat > /etc/systemd/resolved.conf.d/no-stub.conf <<EOF
 [Resolve]
-DNS=1.1.1.1 8.8.4.4
+DNS=${DNS_PRIMARY} ${DNS_SECONDARY}
 DNSStubListener=no
 Domains=~.
 EOF
     systemctl restart systemd-resolved
-    ok "DNS locked → 1.1.1.1 + 8.8.4.4"
+    ok "DNS locked → ${DNS_PRIMARY} + ${DNS_SECONDARY}"
 else
     chattr -i /etc/resolv.conf 2>/dev/null || true
-    cat > /etc/resolv.conf <<'EOF'
-nameserver 1.1.1.1
-nameserver 8.8.4.4
+    cat > /etc/resolv.conf <<EOF
+nameserver ${DNS_PRIMARY}
+nameserver ${DNS_SECONDARY}
 options timeout:2 attempts:2
 EOF
-    ok "DNS locked → /etc/resolv.conf"
+    chattr +i /etc/resolv.conf 2>/dev/null || true
+    ok "DNS locked → ${DNS_PRIMARY} + ${DNS_SECONDARY}"
 fi
 
 # ============================================================================
@@ -208,7 +229,7 @@ export XDG_SESSION_TYPE=x11
 export DBUS_SESSION_BUS_ADDRESS=$(dbus-launch --sh-syntax 2>/dev/null | grep DBUS_SESSION_BUS_ADDRESS | cut -d= -f2- | tr -d "';")
 xrdb $HOME/.Xresources 2>/dev/null || true
 xfconf-query -c xfwm4 -p /general/use_compositing -s false 2>/dev/null || true
-startxfce4 &
+exec startxfce4
 EOF
 chmod +x /root/.vnc/xstartup
 
@@ -332,6 +353,7 @@ systemctl start websockify
 sleep 5
 systemctl start firefox-vnc
 ok "VNC + noVNC + Firefox running"
+fi
 
 # ============================================================================
 # SUMMARY
