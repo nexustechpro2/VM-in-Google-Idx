@@ -470,9 +470,11 @@ fi
 
 cat > /root/.vnc/xstartup <<'EOF'
 #!/bin/bash
+export DISPLAY=:1
 export XDG_SESSION_TYPE=x11
-unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
+eval $(dbus-launch --sh-syntax)
+export DBUS_SESSION_BUS_ADDRESS
 exec startxfce4
 EOF
 chmod +x /root/.vnc/xstartup
@@ -486,8 +488,8 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root
-ExecStartPre=/bin/sh -c 'vncserver -kill :1 2>/dev/null; sleep 2; true'
-ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 16 -fg
+ExecStartPre=-/bin/bash -c 'pkill Xtigervnc; rm -f /tmp/.X1-lock /tmp/.X11-unix/X1; sleep 2'
+ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 16
 ExecStop=/usr/bin/vncserver -kill :1
 Restart=on-failure
 RestartSec=5
@@ -527,10 +529,10 @@ Environment=MOZ_DISABLE_CRASHREPORTER=1
 Environment=MOZ_CRASHREPORTER_DISABLE=1
 ExecStartPre=/bin/sleep 5
 ExecStart=/usr/bin/firefox --display=:1 --no-remote --profile /root/.firefox-vnc-profile
-ExecStop=/bin/bash -c 'pkill -SIGTERM -f "firefox.*firefox-vnc-profile"; sleep 4'
+ExecStop=/bin/bash -c 'pkill -SIGTERM -f "firefox.*firefox-vnc-profile"; sleep 15'
 Restart=on-failure
 RestartSec=10
-TimeoutStopSec=15
+TimeoutStopSec=25
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -551,9 +553,9 @@ user_pref("browser.cache.memory.enable", true);
 user_pref("browser.cache.memory.capacity", 524288);
 user_pref("browser.cache.offline.enable", false);
 
-// Session restore — save once per hour, keep only 1 copy
+// Session restore — save every 15s, keep only 1 copy
 user_pref("browser.startup.page", 3);
-user_pref("browser.sessionstore.interval", 3600000);
+user_pref("browser.sessionstore.interval", 15000);
 user_pref("browser.sessionstore.max_resumed_crashes", -1);
 user_pref("browser.sessionstore.resume_from_crash", true);
 user_pref("browser.sessionstore.resume_session_once", false);
