@@ -485,10 +485,10 @@ cat > /etc/systemd/system/vncserver.service <<'EOF'
 Description=TigerVNC Server
 After=network.target
 [Service]
-Type=simple
+Type=forking
 User=root
 WorkingDirectory=/root
-ExecStartPre=-/bin/bash -c 'pkill Xtigervnc; rm -f /tmp/.X1-lock /tmp/.X11-unix/X1; sleep 2'
+ExecStartPre=/bin/bash -c 'pkill Xtigervnc || true; rm -f /tmp/.X1-lock /tmp/.X11-unix/X1; sleep 1'
 ExecStart=/usr/bin/vncserver :1 -geometry 1280x720 -depth 16
 ExecStop=/usr/bin/vncserver -kill :1
 Restart=on-failure
