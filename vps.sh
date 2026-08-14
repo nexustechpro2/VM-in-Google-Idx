@@ -514,7 +514,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# Firefox service — persistent profile, clean shutdown for tab save
+# Firefox service — persistent profile
 cat > /etc/systemd/system/firefox-vnc.service <<'EOF'
 [Unit]
 Description=Firefox on VNC display
@@ -527,12 +527,11 @@ Environment=DISPLAY=:1
 Environment=HOME=/root
 Environment=MOZ_DISABLE_CRASHREPORTER=1
 Environment=MOZ_CRASHREPORTER_DISABLE=1
-ExecStartPre=/bin/sleep 5
 ExecStart=/usr/bin/firefox --display=:1 --no-remote --profile /root/.firefox-vnc-profile
-ExecStop=/bin/bash -c 'pkill -SIGTERM -f "firefox.*firefox-vnc-profile"; sleep 15'
 Restart=on-failure
 RestartSec=10
-TimeoutStopSec=25
+TimeoutStartSec=60
+TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -544,6 +543,12 @@ mkdir -p /root/.firefox-vnc-profile/extensions
 # Pre-install Auto Refresh extension
 curl -fsSL "https://addons.mozilla.org/firefox/downloads/file/4937205/auto_refresh_url-1.0.34.xpi" \
     -o "/root/.firefox-vnc-profile/extensions/{9cf28bf3-b2e3-4912-b703-ad49a17b97c8}.xpi" 2>/dev/null || true
+
+# Clear stale locks and crash session on every boot
+rm -f /root/.firefox-vnc-profile/sessionstore-backups/*.jsonlz4
+rm -f /root/.firefox-vnc-profile/sessionstore.jsonlz4
+rm -f /root/.firefox-vnc-profile/.parentlock
+rm -f /root/.firefox-vnc-profile/lock
 
 if [ ! -f /root/.firefox-vnc-profile/places.sqlite ]; then
     cat > /root/.firefox-vnc-profile/user.js <<'EOF'
