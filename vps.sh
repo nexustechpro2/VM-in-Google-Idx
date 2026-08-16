@@ -141,6 +141,7 @@ SSH_PORT="$SSH_PORT"
 GUI_MODE="$GUI_MODE"
 PORT_FORWARDS="$PORT_FORWARDS"
 CREATED="$CREATED"
+INSTALL_EXTRAS="${INSTALL_EXTRAS:-false}"
 EOF
     ok "Config saved"
 }
@@ -381,6 +382,7 @@ sleep 4
 SSHX_LINK=$(sudo journalctl -u sshx -n 10 --no-pager 2>/dev/null | grep -o 'https://sshx.io/s/[^ ]*' | tail -1)
 echo "sshx: $SSHX_LINK"
 
+if [ "${INSTALL_EXTRAS:-false}" = "true" ]; then
 # PHP-FPM
 PHP_VER=""
 for ver in 8.3 8.4 8.2 8.1; do
@@ -414,6 +416,7 @@ EOF
     sudo phpenmod -v "${PHP_VER}" opcache 2>/dev/null || true
 fi
 sudo systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || true
+fi # end INSTALL_EXTRAS
 
 # Pelican
 PELICAN_FOUND=false
@@ -456,6 +459,7 @@ systemctl daemon-reload
 systemctl enable fix-docker-bridges 2>/dev/null || true
 systemctl start fix-docker-bridges 2>/dev/null || true
 
+if [ "${INSTALL_EXTRAS:-false}" = "true" ]; then
 # VNC — install TigerVNC if missing (faster than TightVNC)
 apt-get install -y xfce4 xfce4-goodies tigervnc-standalone-server novnc websockify 2>/dev/null || \
 apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify 2>/dev/null || true
@@ -631,15 +635,46 @@ if command -v vncserver &>/dev/null; then
        systemctl start firefox-vnc 2>/dev/null || true
     fi
 fi
+fi # end INSTALL_EXTRAS
 REMOTE
 }
 
 post_boot_setup() {
     local port=$1 user=$2 pass=$3
     log "Running post-boot setup..."
-    # Pass VNC password via env substitution before heredoc
-    VNC_PASS="${pass:0:8}" remote_user_setup "$port" "$user" "$pass"
-    remote_root_setup "$port" "$pass"
+
+    # Load saved choice from conf (INSTALL_EXTRAS already in env if load_vm was called)
+    local saved="${INSTALL_EXTRAS:-}"
+    local default_label
+
+    if [[ -z "$saved" ]]; then
+        # First time — ask
+        read -rp "$(prompt "Install GUI + PHP stack (VNC/Firefox/PHP-FPM/OPcache)? [y/N]: ")" _gui_choice
+        [[ "${_gui_choice:-N}" =~ ^[Yy]$ ]] && INSTALL_EXTRAS=true || INSTALL_EXTRAS=false
+        save_vm
+        log "Choice saved: INSTALL_EXTRAS=$INSTALL_EXTRAS"
+    else
+        # Saved choice exists — countdown
+        INSTALL_EXTRAS="$saved"
+        [[ "$saved" == "true" ]] && default_label="Y" || default_label="N"
+        echo -ne "$(prompt "Install GUI + PHP stack? Saved default=${default_label}. Override in: ")"
+        local i override=""
+        for i in 3 2 1; do
+            echo -ne "${YELLOW}${i}${NC} "
+            read -t 1 -rn 1 override && echo && break || true
+        done
+        echo
+        if [[ -n "$override" ]]; then
+            [[ "$override" =~ ^[Yy]$ ]] && INSTALL_EXTRAS=true || INSTALL_EXTRAS=false
+            save_vm
+            log "Choice updated: INSTALL_EXTRAS=$INSTALL_EXTRAS"
+        else
+            log "Using saved choice: INSTALL_EXTRAS=$INSTALL_EXTRAS"
+        fi
+    fi
+
+    VNC_PASS="${pass:0:8}" INSTALL_EXTRAS="$INSTALL_EXTRAS" remote_user_setup "$port" "$user" "$pass"
+    INSTALL_EXTRAS="$INSTALL_EXTRAS" remote_root_setup "$port" "$pass"
     ok "Post-boot setup complete"
 }
 
